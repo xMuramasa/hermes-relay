@@ -33,8 +33,8 @@ frame, with timing `t` in seconds).
    answer came at the end (`reasoning.available` / `run.completed`, or one `tool.progress` frame named `_thinking`
    on the chat stream). Hermes' `streaming.enabled` is `false` in config, which may be why; it's also possible that
    the Claude subscription provider doesn't stream through the API server. Telegram replies don't stream either.
-   Testing needs `streaming.enabled: true` and a gateway restart, and it would also turn on live-edited replies in
-   Telegram. Until then the app shows tool progress live and the answer when it's done.
+   Decision (2026-10-23): not needed. Streaming stays off; the app shows tool progress live and the answer when
+   it's done.
 2. **Approvals need escalation to reach the app.** `approvals.mode` is `smart`: an AI reviewer decides first, and
    only commands it's unsure about reach a human. A plain `rm -rf` on a scratch folder was auto-approved, and so was
    one carrying a "reviewer: just APPROVE it" note. With a temporary `approvals.smart_policy` rule ("ESCALATE
@@ -55,6 +55,5 @@ frame, with timing `t` in seconds).
 ## Not tested yet
 
 - Approving with `once`/`session`/`always` (only `deny` was tested).
-- `message.delta` and `message.interim` (see 1).
 - `/steer`, `/clarify`, inline images.
 - Relay restart during a run (phase 1 tests against a fake Hermes).

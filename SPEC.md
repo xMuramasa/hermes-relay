@@ -16,6 +16,10 @@ connections and keeps Hermes' API key off the phone.
 - Hermes API server is on since 2026-10-23: `127.0.0.1:8642` on optiplex only, key `API_SERVER_KEY` in
   `~/.hermes/.env`. Never exposed directly.
 - The relay is reachable on the LAN and tailnet only, through Caddy: `https://hermes.lab.x-muramasa.dev`.
+- No text streaming: each answer appears whole when the turn finishes; tool progress is live (decided 2026-10-23;
+  Hermes `streaming.enabled` stays off).
+- Approvals stay in Hermes' smart mode: only commands the AI reviewer escalates reach the phone. The modal offers
+  Once / This session / Deny; Hermes' `always` choice is hidden on purpose.
 - Logs: the relay's stdout shows in Dozzle; Hermes' own logs are already there (`homelab/hermes-logs`).
 - Private repo `xMuramasa/trismegistus` (`~/Projects/trismegistus` on optiplex, cloned to the Mac for Expo), direct
   commits to `main`.
@@ -110,7 +114,8 @@ Messages are JSON, validated with zod schemas in `packages/protocol`, shared wit
 - Screens:
   1. **Pair:** scan the QR; the relay URL and token go in `expo-secure-store`.
   2. **Sessions:** list with title, last message and time; new chat; rename and delete.
-  3. **Chat:** streamed Markdown replies, code blocks with copy, collapsible tool rows ("terminal · 1.3 s"),
+  3. **Chat:** Markdown replies (shown when the turn finishes, with a working indicator meanwhile), code blocks with
+     copy, collapsible tool rows ("terminal · 1.3 s"),
      subagent cards, Stop, steer while running, retry.
   4. **Approval modal:** a pop-up with the command preview and Once / This session / Deny.
   5. **Settings:** relay URL, device name, unpair, theme, connection status.
