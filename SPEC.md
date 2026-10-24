@@ -4,15 +4,19 @@ Trismegistus is an Android companion app for Hermes, plus the relay server it ta
 
 ## Goal
 
-An Android app for talking to Hermes on optiplex from the phone: streamed replies, live tool progress, approvals for
-risky commands, and past conversations. A small relay server keeps conversations alive across flaky mobile
+An Android app for talking to Hermes on optiplex from the phone: replies, live tool progress, approvals for risky
+commands, and past conversations. A small relay server keeps conversations alive across flaky mobile
 connections and keeps Hermes' API key off the phone.
 
 ## Decisions so far
 
 - Android only. Expo (React Native, TypeScript, Bun). Expo Go for day-to-day work; APKs from EAS Build (free plan)
   or local builds on the Mac.
-- Relay: Bun + WebSocket. Not WebTransport: no React Native client, and it needs HTTP/3 end to end.
+- Relay: Go + WebSocket (chosen 2026-10-23 over Bun: one static binary, ~10-20 MB RAM). Not WebTransport: no React
+  Native client, and it needs HTTP/3 end to end.
+- The relay and the app share no code, so the WebSocket protocol is defined once in `protocol/schema.json` (JSON
+  Schema) with example messages in `protocol/examples/`. Go tests and the app's tests must both accept every valid
+  example and reject every invalid one.
 - Hermes API server is on since 2026-10-23: `127.0.0.1:8642` on optiplex only, key `API_SERVER_KEY` in
   `~/.hermes/.env`. Never exposed directly.
 - The relay is reachable on the LAN and tailnet only, through Caddy: `https://hermes.lab.x-muramasa.dev`.
@@ -38,71 +42,95 @@ phone app --WSS--> Caddy (hermes.lab) --> relay 172.18.0.1:8650 --HTTP/SSE--> He
 
 ## Hermes API used
 
-Checked against `/v1/capabilities` on Hermes 0.22.2.
+Checked on Hermes 0.22.2 (`/v1/capabilities`) and recorded in phase 0 (`probe/FINDINGS.md`, `probe/fixtures/`).
 
-- Sessions: `GET/POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}`, `GET /api/sessions/{id}/messages`.
-- Start a turn: `POST /v1/runs` `{input, session_id}` with an `Idempotency-Key` header (a retry never starts a second
-  turn).
-- Live events: `GET /v1/runs/{id}/events` (SSE): `message.delta`, `message.interim`, `tool.started`,
-  `tool.completed`, `subagent.start`/`subagent.complete`, `approval.request`, then `run.completed`, `run.failed` or
-  `run.cancelled`. Hermes drops unread events after 5 minutes, so the relay reads them as they come. Phase 0 results
-  (what actually arrives on this server) are in `probe/FINDINGS.md`.
-- Run controls: `GET /v1/runs/{id}` (status and `pending_controls`), `POST /v1/runs/{id}/approval`
-  `{request_id, execution_generation, choice}`, `/clarify`, `/stop`, `/steer`.
+- Sessions: `GET /api/sessions` (`{data: [...], has_more}`; every source: api_server, telegram, cli, cron…),
+  `POST /api/sessions {title?}` (titles must be unique, so the relay sends none), `GET/PATCH/DELETE
+  /api/sessions/{id}`, `GET /api/sessions/{id}/messages` (`{data: [{id, role, content, tool_calls, tool_name,
+  timestamp, ...}], pagination}`).
+- Start a turn: `POST /v1/runs {input, session_id}` + `Idempotency-Key` → 202 `{run_id, status, replayed}`; the same
+  key again returns the same run (`replayed: true`).
+- Live events: `GET /v1/runs/{id}/events` (SSE, frames `data: {event, run_id, timestamp, seq, ...}`, no `event:` line,
+  `: keepalive` every 10 s). Seen: `tool.started`, `tool.completed`, `subagent.start`, `subagent.complete`,
+  `approval.request`, `approval.responded`, `reasoning.available` (carries the final answer text on this provider),
+  `run.completed`, `run.cancelled`; documented but not seen: `run.failed`, `message.delta`, `message.interim`,
+  `run.steered`. Hermes drops unread events after 5 minutes, so the relay reads them as they come.
+- Run controls: `GET /v1/runs/{id}` (`status` incl. `waiting_for_approval` with an `approval` object),
+  `POST /v1/runs/{id}/approval {request_id, choice}` (`execution_generation` may be null), `POST /v1/runs/{id}/stop`,
+  `POST /v1/runs/{id}/steer {text}` (only while `running`, else 409).
 - Later: `GET /api/model/options` for a model picker.
 
 Limits:
-- API sessions are separate from Telegram and CLI sessions. The API refuses to run turns in a Telegram chat (409),
-  but can list and read them (phase 0), so the app can show them read-only.
-- The exact event payloads are only partly documented. Phase 0 records real ones as test fixtures.
+- Hermes refuses turns in sessions another surface owns (Telegram, CLI…: 409). The relay only lets the phone write to
+  `source: api_server` sessions; the others are listed and readable, read-only.
 - Phone chats run on the main Hermes model and share the Claude usage limit with everything else.
+- No text streaming (see Decisions): the answer arrives with `run.completed`.
 
-## Relay (`apps/relay`)
+## Relay (`relay/`)
 
-- Bun + TypeScript, `bun:sqlite` at `/data/relay.db` (named volume). Container `trismegistus-relay`.
-- Container: `network_mode: host` so it can reach `127.0.0.1:8642`; listens on `172.18.0.1:8650` (the `proxy`
-  network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only root filesystem, `mem_limit`
-  128m.
-- Config (env): `HERMES_URL` (default `http://127.0.0.1:8642`), `HERMES_API_KEY`, `RELAY_HOST`, `RELAY_PORT`,
-  `PUBLIC_URL`. The key goes in `homelab/trismegistus/.env` (mode 600), copied from `~/.hermes/.env` by an install
-  script without printing it. Only that one variable: the rest of Hermes' `.env` never enters the container.
+- Go 1.27.3, one module in `relay/`. Dependencies kept to: `github.com/coder/websocket` (WebSocket),
+  `modernc.org/sqlite` (pure-Go SQLite, no cgo), a QR-to-terminal package. Everything else is the standard library
+  (`net/http`, `log/slog` JSON logs, `encoding/json`). Pinned in `go.mod`/`go.sum`.
+- One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>`,
+  `devices list`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
+- Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log.
+- Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
+  nonroot`), `CGO_ENABLED=0`, ~15 MB image. `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
+  `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
+  root filesystem, `cap_drop: ALL`, `mem_limit` 64m.
+- Config (env): `HERMES_URL` (default `http://127.0.0.1:8642`), `HERMES_API_KEY` (required), `RELAY_ADDR` (default
+  `127.0.0.1:8650`), `PUBLIC_URL` (put in the pairing QR), `DATA_DIR` (default `/data`). The key goes in
+  `homelab/trismegistus/.env` (mode 600), copied from `~/.hermes/.env` by an install script without printing it.
+  Only that one variable: the rest of Hermes' `.env` never enters the container.
 
 ### Pairing and devices
 
-- `docker exec -it trismegistus-relay bun run pair --name pixel-8` prints a QR code in the terminal holding the relay URL
-  and a one-time code, valid for 10 minutes.
-- The app scans it (camera works in Expo Go) and trades the code for a device token (32 random bytes). The relay
-  stores only its SHA-256, plus the name, creation time and last-seen time.
-- `bun run devices list` and `bun run devices revoke <name>`. A revoked phone is disconnected at once.
+- `docker exec -it trismegistus-relay trismegistus-relay pair --name pixel-8` prints a QR code in the terminal holding
+  `{url, code}` (the relay's public URL and a one-time code, valid 10 minutes, single use).
+- The app scans it (camera works in Expo Go) and trades the code for a device token (32 random bytes, base64url). The
+  relay stores only its SHA-256, plus the name, creation time and last-seen time.
+- `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once.
 - The token never appears in chat, logs or the repo.
 
 ### REST (device token as Bearer)
 
-- `GET/POST /api/sessions`, `GET /api/sessions/:id/messages`, `PATCH/DELETE /api/sessions/:id`: passed to Hermes from
-  an allowlist. Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control or admin).
-- `POST /api/pair` (one-time code → device token), `GET /healthz` (no auth, no details).
+- `GET /api/sessions`, `POST /api/sessions`, `GET /api/sessions/:id`, `GET /api/sessions/:id/messages`: passed to
+  Hermes. `PATCH /api/sessions/:id` (rename) and `DELETE /api/sessions/:id` only for `source: api_server` sessions.
+  Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control, skills, admin).
+- `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited), `GET /healthz` (no auth, no details).
 
 ### WebSocket `/ws`
 
-Messages are JSON, validated with zod schemas in `packages/protocol`, shared with the app.
+Messages are JSON objects with a `type` field, defined in `protocol/schema.json`.
 
 - Phone → relay: `auth {token}` (must be the first message, within 5 s), `subscribe {session_id, after_seq?}`,
-  `prompt {client_msg_id, session_id, text}`, `stop {run_id}`, `steer {run_id, text}`,
-  `approve {run_id, request_id, generation, choice}`, `clarify {run_id, request_id, generation, answer}`, `ping`.
-- Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, type, data, ts}`,
-  `run {run_id, session_id, status}`, `ack {client_msg_id, run_id}`, `error {code, message}`, `pong`.
-- `seq` counts up per session. Events are kept 24 hours for replay.
-- `client_msg_id` becomes Hermes' `Idempotency-Key`, so a double tap or a resend after reconnecting can't start two
-  turns.
+  `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text}`, `stop {run_id}`, `steer {run_id, text}`,
+  `approve {run_id, request_id, choice: once|session|deny}`, `ping`.
+- Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}`,
+  `run {run_id, session_id, status}`, `ack {client_msg_id, run_id, replayed}`, `error {code, message, ref?}`, `pong`.
+- `event.kind` is the relay's own small vocabulary, mapped from Hermes events: `tool.started`, `tool.completed`,
+  `subagent.started`, `subagent.completed`, `approval.requested`, `approval.resolved`, `answer` (from `run.completed`
+  output; `reasoning.available` is dropped as a duplicate), `run.completed`, `run.failed`, `run.cancelled`,
+  `steer.queued`, `reconnected` (relay lost the stream and recovered), `unknown` (anything new; `data` passed through
+  so the app can ignore it). `data` keeps only the fields the app needs (previews, durations, error flags, the
+  approval command and description); no usage or cost numbers.
+- `approval.requested` lists only `once`, `session`, `deny`; the relay refuses `always` from the phone.
+- `seq` counts up per session across runs, from 1. Events are kept 24 hours for replay; a `subscribe` with an
+  `after_seq` older than the buffer gets `error replay_gap` and the app reloads the session history over REST.
+- `client_msg_id` (a UUID) becomes Hermes' `Idempotency-Key`, so a double tap or a resend after reconnecting can't
+  start two turns.
 - One run at a time per session. A prompt during a run gets `error busy`; the app offers to send it as a steer.
-- Keepalive: ping every 25 s, drop the socket after two missed. Runs never depend on a socket being open.
-- Relay restart: runs still marked running are re-attached (or polled to their end); the gap shows as a
-  "reconnected" marker and the final answer is taken from the session history.
+- Keepalive: the relay pings every 25 s and drops the socket after two missed pongs. Runs never depend on a socket
+  being open.
+- Relay restart: runs that were in progress are found again (`GET /v1/runs/{id}`) and re-attached or polled to their
+  end; the gap is marked with a `reconnected` event and the answer comes from `run.completed` or the run status.
 
 ### Logging and limits
 
-- JSON lines to stdout: device name, session and run ids, event counts, durations. Never message text, never tokens.
-- 64 KB per WebSocket message, 20 prompts a minute per device, at most 5 devices and 3 sockets per device.
+- JSON lines to stdout (`log/slog`): device name, session and run ids, event counts, durations, Hermes status codes.
+  Never message text, approval commands or tokens.
+- 64 KB per WebSocket message, 20 prompts a minute per device, at most 5 devices and 3 sockets per device, 10 pairing
+  attempts a minute.
 
 ## App (`apps/mobile`)
 
@@ -121,15 +149,15 @@ Messages are JSON, validated with zod schemas in `packages/protocol`, shared wit
   5. **Settings:** relay URL, device name, unpair, theme, connection status.
 - One WebSocket. Reconnects with backoff on drops and when the app returns to the foreground, then resubscribes from
   the last `seq`. Sessions and recent messages are cached on the phone for offline reading.
-- Tests: `bun test` for the protocol and the event reducer (on phase 0 fixtures); a few component tests with
+- Tests: `bun test` for the protocol (against `protocol/examples/`) and the event reducer; a few component tests with
   `@testing-library/react-native`; typecheck and `expo-doctor`.
 
 ## Dev setups
 
 - **Phone + Mac + optiplex relay:** the Expo dev server runs on the Mac; the app connects to
   `https://hermes.lab.x-muramasa.dev` over the tailnet.
-- **Relay on the Mac:** `bun run relay:dev` with `HERMES_URL` pointing at an SSH tunnel
-  (`ssh -N -L 8642:127.0.0.1:8642 optiplex`). The app's relay URL is a setting, so it can point at either.
+- **Relay on the Mac:** `cd relay && go run ./cmd/trismegistus-relay` with `HERMES_URL` pointing at an SSH tunnel
+  (`ssh -N -L 8642:127.0.0.1:8642 optiplex`) and a local `DATA_DIR`. The app's relay URL is a setting, so it can point at either.
 - **APKs:** EAS Build free plan (a limited number of low-priority builds a month; check the account's billing page)
   or local builds on the Mac.
 
@@ -154,8 +182,9 @@ Messages are JSON, validated with zod schemas in `packages/protocol`, shared wit
 
 0. **Probe** (optiplex, no app): record real event streams for a plain answer, a tool call, an approval, a stop and a
    delegated subagent; check whether Telegram sessions can be read. Saved as fixtures. Costs a few small turns.
-1. **Relay:** protocol, relay, pairing CLI, tests against a fake Hermes built from the fixtures; deploy behind Caddy.
-2. **App MVP in Expo Go:** pair, sessions, streamed chat, stop, reconnect and replay.
+1. **Relay:** protocol schema and examples, Go relay, pairing CLI, tests against a fake Hermes that replays the
+   phase 0 fixtures; deploy behind Caddy.
+2. **App MVP in Expo Go:** pair, sessions, chat, stop, reconnect and replay.
 3. **Approvals and APK:** approval modal, development build, push notifications (needs a free
    Firebase project for FCM v1 and a development build; Expo Go can't receive pushes on Android).
 4. **Later:** bot picker for other profiles (`/p/<profile>/`, each with its own key), a news tab from news-reader,
