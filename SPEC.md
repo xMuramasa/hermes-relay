@@ -41,14 +41,15 @@ Checked against `/v1/capabilities` on Hermes 0.22.2.
   turn).
 - Live events: `GET /v1/runs/{id}/events` (SSE): `message.delta`, `message.interim`, `tool.started`,
   `tool.completed`, `subagent.start`/`subagent.complete`, `approval.request`, then `run.completed`, `run.failed` or
-  `run.cancelled`. Hermes drops unread events after 5 minutes, so the relay reads them as they come.
+  `run.cancelled`. Hermes drops unread events after 5 minutes, so the relay reads them as they come. Phase 0 results
+  (what actually arrives on this server) are in `probe/FINDINGS.md`.
 - Run controls: `GET /v1/runs/{id}` (status and `pending_controls`), `POST /v1/runs/{id}/approval`
   `{request_id, execution_generation, choice}`, `/clarify`, `/stop`, `/steer`.
 - Later: `GET /api/model/options` for a model picker.
 
 Limits:
-- API sessions are separate from Telegram and CLI sessions. The API refuses to run turns in a Telegram chat (409).
-  Phase 0 checks whether it can at least read them.
+- API sessions are separate from Telegram and CLI sessions. The API refuses to run turns in a Telegram chat (409),
+  but can list and read them (phase 0), so the app can show them read-only.
 - The exact event payloads are only partly documented. Phase 0 records real ones as test fixtures.
 - Phone chats run on the main Hermes model and share the Claude usage limit with everything else.
 

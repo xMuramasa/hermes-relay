@@ -7,7 +7,7 @@ the small relay server the app talks to. See [SPEC.md](SPEC.md).
 phone (Expo app) --WebSocket--> relay (Bun) --HTTP/SSE--> Hermes API server (localhost only)
 ```
 
-Status: phase 0 (probing the Hermes API).
+Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (relay) next.
 
 ## Layout
 
