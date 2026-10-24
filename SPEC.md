@@ -75,21 +75,25 @@ Limits:
   `devices list`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log.
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
-  nonroot`), `CGO_ENABLED=0`, ~15 MB image. `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
+  nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
   `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
-  root filesystem, `cap_drop: ALL`, `mem_limit` 64m.
+  root filesystem, `cap_drop: ALL`, `mem_limit` 64m. The version is stamped with `--build-arg VERSION=...`.
 - Config (env): `HERMES_URL` (default `http://127.0.0.1:8642`), `HERMES_API_KEY` (required), `RELAY_ADDR` (default
-  `127.0.0.1:8650`), `PUBLIC_URL` (put in the pairing QR), `DATA_DIR` (default `/data`). The key goes in
+  `127.0.0.1:8650`), `PUBLIC_URL` (put in the pairing QR), `DATA_DIR` (default `/data`), `TRUSTED_PROXIES` (default
+  `127.0.0.1/32,172.16.0.0/12`: peers whose `X-Forwarded-For` is used for rate limits), `LOG_LEVEL` (default `info`). The key goes in
   `homelab/trismegistus/.env` (mode 600), copied from `~/.hermes/.env` by an install script without printing it.
   Only that one variable: the rest of Hermes' `.env` never enters the container.
 
 ### Pairing and devices
 
 - `docker exec -it trismegistus-relay trismegistus-relay pair --name pixel-8` prints a QR code in the terminal holding
-  `{url, code}` (the relay's public URL and a one-time code, valid 10 minutes, single use).
-- The app scans it (camera works in Expo Go) and trades the code for a device token (32 random bytes, base64url). The
-  relay stores only its SHA-256, plus the name, creation time and last-seen time.
-- `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once.
+  `{"v":1,"url":PUBLIC_URL,"code":...}` (a one-time code `XXXX-XXXX-XXXX`, Crockford base32, valid 10 minutes, single
+  use, stored hashed), plus the code and expiry as text. An existing name fails unless `--replace`, which revokes the
+  old device.
+- The app scans it (camera works in Expo Go) and trades the code for a device token (`trs_` + base64url of 32 random
+  bytes). The relay stores only its SHA-256, plus the name, creation time and last-seen time.
+- `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once (the server checks every 2 s,
+  since the CLI runs as another process on the same database).
 - The token never appears in chat, logs or the repo.
 
 ### REST (device token as Bearer)
@@ -97,7 +101,11 @@ Limits:
 - `GET /api/sessions`, `POST /api/sessions`, `GET /api/sessions/:id`, `GET /api/sessions/:id/messages`: passed to
   Hermes. `PATCH /api/sessions/:id` (rename) and `DELETE /api/sessions/:id` only for `source: api_server` sessions.
   Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control, skills, admin).
-- `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited), `GET /healthz` (no auth, no details).
+- `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited; the name comes from `pair --name`, a
+  `name` in the body is ignored), `GET /healthz` (no auth, no details).
+- `POST /api/sessions` ignores the body and creates an untitled session. Only `limit`, `offset`, `order`, `source`
+  (list) and `limit`, `offset`, `order`, `before`, `after` (messages) query parameters are passed on. Errors are
+  `{"error": {code, message}}` with the WebSocket error codes.
 
 ### WebSocket `/ws`
 
@@ -106,17 +114,31 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 - Phone → relay: `auth {token}` (must be the first message, within 5 s), `subscribe {session_id, after_seq?}`,
   `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text}`, `stop {run_id}`, `steer {run_id, text}`,
   `approve {run_id, request_id, choice: once|session|deny}`, `ping`.
-- Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}`,
-  `run {run_id, session_id, status}`, `ack {client_msg_id, run_id, replayed}`, `error {code, message, ref?}`, `pong`.
+- Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}` (`ts` in unix
+  ms), `run {run_id, session_id, status}` (`running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`; live
+  only, and sent after a `subscribe` replay for the active run), `ack {client_msg_id, run_id, replayed}`,
+  `error {code, message, ref?}`, `pong`. Error codes: `unauthorized`, `bad_request`, `too_large`, `rate_limited`,
+  `busy`, `not_found`, `read_only`, `replay_gap`, `hermes_unavailable`, `hermes_error`, `internal`. Field caps:
+  prompt/steer text ≤ 32768 characters, ids ≤ 128 characters of `[A-Za-z0-9_.:-]`. Per-kind `data` is in the schema.
+- `stop`, `steer` and `approve` are accepted only from sockets subscribed to the run's session.
 - `event.kind` is the relay's own small vocabulary, mapped from Hermes events: `tool.started`, `tool.completed`,
   `subagent.started`, `subagent.completed`, `approval.requested`, `approval.resolved`, `answer` (from `run.completed`
   output; `reasoning.available` is dropped as a duplicate), `run.completed`, `run.failed`, `run.cancelled`,
-  `steer.queued`, `reconnected` (relay lost the stream and recovered), `unknown` (anything new; `data` passed through
-  so the app can ignore it). `data` keeps only the fields the app needs (previews, durations, error flags, the
-  approval command and description); no usage or cost numbers.
+  `steer.queued` (sent when Hermes accepts a steer; Hermes' `run.steered` is dropped as a duplicate),
+  `reconnected {reason: stream_lost|relay_restart}` (marks a gap: the relay lost the stream or restarted and is
+  recovering), `unknown` (anything new; `data` passed through so the app can ignore it, emptied with `truncated`
+  over 8 KiB). `message.delta` is dropped (streaming is off). `data` keeps only the fields the app needs (previews,
+  durations, error flags, the approval command and description); no usage or cost numbers. Answers over 256 KiB are
+  cut and marked `truncated`.
+- Hermes' per-run `seq` is stored with each run; frames at or below it are skipped, so re-reading a stream after a
+  drop or restart never duplicates events. A stream that ends without a terminal frame, or is silent for 45 s (no
+  frame, no keepalive), is followed by `GET /v1/runs/{id}` polls with backoff (1 s doubling to 30 s, `Retry-After`
+  respected): still running → re-attach; ended → the terminal events come from the status; unknown to Hermes or no
+  contact for 2 hours → `run.failed`.
 - `approval.requested` lists only `once`, `session`, `deny`; the relay refuses `always` from the phone.
 - `seq` counts up per session across runs, from 1. Events are kept 24 hours for replay; a `subscribe` with an
-  `after_seq` older than the buffer gets `error replay_gap` and the app reloads the session history over REST.
+  `after_seq` older than the buffer (or beyond the last seq, or more than 5000 events back) gets `error replay_gap`
+  and the app reloads the session history over REST.
 - `client_msg_id` (a UUID) becomes Hermes' `Idempotency-Key`, so a double tap or a resend after reconnecting can't
   start two turns.
 - One run at a time per session. A prompt during a run gets `error busy`; the app offers to send it as a steer.
@@ -129,8 +151,10 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 
 - JSON lines to stdout (`log/slog`): device name, session and run ids, event counts, durations, Hermes status codes.
   Never message text, approval commands or tokens.
-- 64 KB per WebSocket message, 20 prompts a minute per device, at most 5 devices and 3 sockets per device, 10 pairing
-  attempts a minute.
+- 64 KB per WebSocket message (bigger closes the socket, 1009), 20 prompts a minute per device, at most 5 devices and
+  3 sockets per device (a 4th closes the oldest), 10 pairing attempts a minute per client IP (30 overall), 4
+  requests waiting on Hermes per socket. A socket that falls 8192 messages behind is closed; the app resubscribes.
+- WebSocket `Origin` is not checked: the app authenticates with a token in its first message, never a cookie.
 
 ## App (`apps/mobile`)
 

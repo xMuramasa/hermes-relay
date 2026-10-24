@@ -1,0 +1,7 @@
+Dockerfile
+.dockerignore
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
