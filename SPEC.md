@@ -159,8 +159,13 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 ## App (`apps/mobile`)
 
 - Expo, TypeScript, Expo Router.
-- SDK: Expo SDK 58 is out (React Native 0.88), but Expo Go for SDK 58 isn't on the Play Store yet. Start on the
-  newest SDK the store's Expo Go runs (checked on day 1) and upgrade when it catches up.
+- SDK: Expo SDK 58 (React Native 0.88). Expo Go for SDK 58 is on the Play Store since 2026-10-19, so the app
+  targets it directly. Only modules Expo Go bundles; no prebuild until phase 3.
+- Libraries (phase 2a): Expo Router, NativeWind 4.2 + tailwindcss 3.4 (NativeWind 5 is an rc), zustand,
+  react-native-marked for Markdown (pure JS, maintained), lucide-react-native icons, Cormorant Garamond / Inter /
+  JetBrains Mono from `@expo-google-fonts`. The app's protocol decoder is hand-written (ajv generates code with
+  `new Function`, which Hermes doesn't run); its tests check it against `protocol/examples/`, and the builders
+  against the schema with ajv.
 - Look: expressive, not stock. NativeWind (Tailwind for React Native) with shadcn-style components
   (react-native-reusables), light and dark themes, its own type and accent.
 - Screens:
@@ -208,7 +213,11 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
    delegated subagent; check whether Telegram sessions can be read. Saved as fixtures. Costs a few small turns.
 1. **Relay:** protocol schema and examples, Go relay, pairing CLI, tests against a fake Hermes that replays the
    phase 0 fixtures; deploy behind Caddy.
-2. **App MVP in Expo Go:** pair, sessions, chat, stop, reconnect and replay.
+2. **App MVP in Expo Go**, in two steps:
+   - **2a:** pair (QR + manual), session list (new, delete, read-only lock), chat (history, live tool rows,
+     subagent cards, Markdown answers). One socket; reconnects only on a tap or when a chat opens.
+   - **2b:** Stop, steer, reconnect with backoff and replay from the last `seq`, foreground resume, offline cache,
+     settings screen, rename.
 3. **Approvals and APK:** approval modal, development build, push notifications (needs a free
    Firebase project for FCM v1 and a development build; Expo Go can't receive pushes on Android).
 4. **Later:** bot picker for other profiles (`/p/<profile>/`, each with its own key), a news tab from news-reader,

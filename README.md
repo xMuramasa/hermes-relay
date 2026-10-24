@@ -7,8 +7,8 @@ the small relay server the app talks to. See [SPEC.md](SPEC.md).
 phone (Expo app) --WebSocket--> relay (Go) --HTTP/SSE--> Hermes API server (localhost only)
 ```
 
-Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (protocol + relay) built and tested against a fake Hermes;
-deploy behind Caddy next.
+Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (protocol + relay) built, tested and deployed; phase 2a (app:
+pair, sessions, chat) built, not yet checked on the phone.
 
 ## Layout
 
@@ -28,7 +28,18 @@ deploy behind Caddy next.
   - `internal/pairing`: tokens, pairing codes, the QR code.
   - `internal/fakehermes`: the fake Hermes the tests run against (replays `probe/fixtures/`).
   - `Dockerfile`: build context `relay/`.
-- `apps/mobile`: the Expo app (phase 2).
+- `apps/mobile`: the Expo app (SDK 58, Expo Go), see [apps/mobile/README.md](apps/mobile/README.md).
+  - `src/app`: screens (pair, sessions, chat); `src/lib`: protocol decoder, pairing, REST, socket, chat reducer;
+    `src/components`: UI; `test`: `bun test` (reads `protocol/` and `probe/fixtures/` by path).
+
+## App
+
+```sh
+cd apps/mobile
+bun install
+bun run check                                     # tsc + bun test
+REACT_NATIVE_PACKAGER_HOSTNAME=<host IP> bun run start   # then scan the QR in Expo Go
+```
 
 ## Protocol
 
