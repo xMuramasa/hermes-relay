@@ -12,6 +12,10 @@ connections and keeps Hermes' API key off the phone.
 
 - Android only. Expo (React Native, TypeScript, Bun). Expo Go for day-to-day work; APKs from EAS Build (free plan)
   or local builds on the Mac.
+- Desktop (decided 2026-10-30): a native macOS menu bar companion in its own repo, `xMuramasa/trismegistus-mac`
+  (Swift, SwiftUI), speaking this protocol against the same relay. No web, Electron or Tauri build of the Expo app.
+  Linux is a Quickshell module in endfield-dotfiles later. The protocol stays owned here; that repo copies
+  `protocol/` with a script and a staleness test.
 - Relay: Go + WebSocket (chosen 2026-10-23 over Bun: one static binary, ~10-20 MB RAM). Not WebTransport: no React
   Native client, and it needs HTTP/3 end to end.
 - The relay and the app share no code, so the WebSocket protocol is defined once in `protocol/schema.json` (JSON
