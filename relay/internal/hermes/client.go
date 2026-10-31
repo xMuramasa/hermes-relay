@@ -264,10 +264,23 @@ type RunCreated struct {
 }
 
 // CreateRun starts a turn. idempotencyKey makes resends return the same run.
-func (c *Client) CreateRun(ctx context.Context, sessionID, input, idempotencyKey string) (RunCreated, error) {
+// RunModel picks the model for one run; the zero value leaves it to Hermes (its default).
+type RunModel struct {
+	Provider string
+	Model    string
+}
+
+// CreateRun starts a run. A chosen model rides in the body because Hermes' /v1/runs ignores the persisted
+// session lock that POST /api/sessions/{id}/model sets (only /api/sessions/{id}/chat reads it); an explicit
+// provider is always honored there.
+func (c *Client) CreateRun(ctx context.Context, sessionID, input, idempotencyKey string, model RunModel) (RunCreated, error) {
 	var out RunCreated
 	hdr := http.Header{"Idempotency-Key": {idempotencyKey}}
-	err := c.doJSON(ctx, http.MethodPost, "/v1/runs", map[string]string{"input": input, "session_id": sessionID}, &out, hdr)
+	body := map[string]string{"input": input, "session_id": sessionID}
+	if model.Provider != "" && model.Model != "" {
+		body["provider"], body["model"] = model.Provider, model.Model
+	}
+	err := c.doJSON(ctx, http.MethodPost, "/v1/runs", body, &out, hdr)
 	if err == nil && !protocol.ValidID(out.RunID) {
 		err = &APIError{Status: http.StatusBadGateway}
 	}

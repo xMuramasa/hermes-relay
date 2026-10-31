@@ -144,6 +144,7 @@ type Fake struct {
 	retryAfter  string
 	CreateCalls int
 	RunInputs   []string
+	RunModels   []string // "provider/model" per created run, "" when the body named none
 	Approvals   []ApprovalCall
 	Stops       []string
 	Steers      []string
@@ -423,6 +424,13 @@ func (f *Fake) modelOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 // ModelLock returns a session's accepted model lock, {provider, model}.
+// RunModelsSeen returns the provider/model each created run named, in order ("" for none).
+func (f *Fake) RunModelsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.RunModels...)
+}
+
 func (f *Fake) ModelLock(id string) [2]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -491,6 +499,8 @@ func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Input     string `json:"input"`
 		SessionID string `json:"session_id"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json"})
@@ -551,6 +561,11 @@ func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 	f.runs[id] = run
 	f.RunInputs = append(f.RunInputs, body.Input)
+	if body.Provider != "" || body.Model != "" {
+		f.RunModels = append(f.RunModels, body.Provider+"/"+body.Model)
+	} else {
+		f.RunModels = append(f.RunModels, "")
+	}
 	if key != "" {
 		f.idem[key] = id
 	}

@@ -167,3 +167,24 @@ func TestFakeModelLockMatchesHermes(t *testing.T) {
 		}
 	}
 }
+
+// A model chosen for a conversation rides in each run's body: Hermes' /v1/runs ignores the session lock.
+func TestChosenModelReachesRuns(t *testing.T) {
+	fake := newFake(t, "plain")
+	r := newRelay(t, fake)
+	token := r.pairAs("macbook", store.RoleManager)
+	chosen, plain := fake.AddSession("api_server"), fake.AddSession("api_server")
+	m := store.SessionModel{Provider: "copilot", Model: "gpt-5.5"}
+	if status, b := r.do("PUT", "/api/sessions/"+chosen+"/model", token, m); status != 200 {
+		t.Fatalf("PUT model: %d %s", status, b)
+	}
+	cl := r.connect(token)
+	for _, sid := range []string{chosen, plain} {
+		if _, ack := cl.prompt(sid); ack.str("type") != "ack" {
+			t.Fatalf("prompt in %s: %v", sid, ack)
+		}
+	}
+	if got := fake.RunModelsSeen(); len(got) != 2 || got[0] != "copilot/gpt-5.5" || got[1] != "" {
+		t.Fatalf("models sent with the runs: %q", got)
+	}
+}

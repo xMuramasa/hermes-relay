@@ -70,15 +70,17 @@ Checked on Hermes 0.22.2 (`/v1/capabilities`) and recorded in phase 0 (`probe/FI
   /api/sessions/{id}/model {provider, model}` (a persisted per-session lock; checked 2026-10-31 in
   `gateway/platforms/api_server.py`: 404 unknown session, 400 no model/provider, 409 `model_lock_unavailable` for a
   provider without a model, otherwise 200 `{object: "hermes.session.model_lock", session_id, runtime}`; Hermes does
-  not check the model against its catalog, the relay does). Only `/api/sessions/{id}/chat` reads that lock today;
-  `POST /v1/runs` does not (see Limits).
+  not check the model against its catalog, the relay does). Only `/api/sessions/{id}/chat` reads that lock;
+  `POST /v1/runs` ignores it but honors `provider` + `model` in its body, so the relay sends the chosen pair with
+  every run.
 
 Limits:
 - Hermes refuses turns in sessions another surface owns (Telegram, CLI…: 409). The relay only lets the phone send turns to
   `source: api_server` sessions; the others are listed and readable, and can be renamed, pinned and tagged (see REST).
-- Phone chats share the Claude usage limit with everything else. A chat's model choice (REST) is stored as Hermes'
-  session lock, but `POST /v1/runs` (how the relay starts turns) doesn't read it yet, so turns still run on the main
-  model until the relay passes `model`/`provider` with each run or Hermes applies the lock there.
+- Phone chats share the Claude usage limit with everything else (unless a chat's chosen model runs elsewhere, e.g.
+  GitHub Copilot). A chat's model choice (REST) is stored in the relay and as Hermes' session lock, and sent as
+  `provider` + `model` with each `POST /v1/runs` (which ignores the lock). The `Idempotency-Key` covers the body, so a
+  resend after the model changed may be refused rather than replayed.
 - No text streaming (see Decisions): the answer arrives with `run.completed`.
 
 ## Relay (`relay/`)

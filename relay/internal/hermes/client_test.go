@@ -104,7 +104,7 @@ func TestErrorMapping(t *testing.T) {
 	}
 	for st, code := range cases {
 		status = st
-		_, err := c.CreateRun(context.Background(), "s", "hi", "k")
+		_, err := c.CreateRun(context.Background(), "s", "hi", "k", RunModel{})
 		pe := ProtocolError(err)
 		if pe.Code != code {
 			t.Errorf("%d → %s, want %s", st, pe.Code, code)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 )
 
@@ -110,6 +111,17 @@ func (s *Store) SessionModels(ctx context.Context) (map[string]SessionModel, err
 		out[id] = m
 	}
 	return out, rows.Err()
+}
+
+// SessionModelFor returns the model chosen for one session, if any.
+func (s *Store) SessionModelFor(ctx context.Context, sessionID string) (SessionModel, bool, error) {
+	var m SessionModel
+	err := s.db.QueryRowContext(ctx, `SELECT provider, model FROM session_models WHERE session_id = ?`, sessionID).
+		Scan(&m.Provider, &m.Model)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionModel{}, false, nil
+	}
+	return m, err == nil, err
 }
 
 // SetSessionModel records a session's chosen model.

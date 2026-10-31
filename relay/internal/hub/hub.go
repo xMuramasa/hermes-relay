@@ -341,9 +341,17 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 	s.starting = true
 	s.mu.Unlock()
 
+	// The model chosen for this conversation in the apps, if any (Hermes' default otherwise).
+	var model hermes.RunModel
+	if m, ok, err := h.store.SessionModelFor(ctx, sessionID); err != nil {
+		h.log.Warn("reading the session's model failed; using Hermes' default", "session_id", sessionID, "err", err.Error())
+	} else if ok {
+		model = hermes.RunModel{Provider: m.Provider, Model: m.Model}
+	}
+
 	// Detached from the socket: if the phone drops now, Hermes may still start the run, and the resend with the
 	// same client_msg_id finds it through the Idempotency-Key.
-	created, err := h.hermes.CreateRun(context.WithoutCancel(ctx), sessionID, text, clientMsgID)
+	created, err := h.hermes.CreateRun(context.WithoutCancel(ctx), sessionID, text, clientMsgID, model)
 
 	s.mu.Lock()
 	s.starting = false
