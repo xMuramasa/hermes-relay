@@ -201,8 +201,8 @@ func (h *Hub) emit(rs *runState, evs []store.NewEvent, upd store.RunUpdate) {
 	}
 }
 
-// Subscribe adds sub to a session. With afterSeq, stored events after it are delivered first (or replay_gap).
-// The active run's status follows.
+// Subscribe adds sub to a session. With afterSeq, stored events after it are delivered first (or replay_gap);
+// without it, a pending approval request of the active run is (see pendingApproval). The active run's status follows.
 func (h *Hub) Subscribe(ctx context.Context, sub Subscriber, sessionID string, afterSeq *int64) error {
 	s := h.lockSession(sessionID)
 	defer h.unlockSession(s)
@@ -220,9 +220,28 @@ func (h *Hub) Subscribe(ctx context.Context, sub Subscriber, sessionID string, a
 	}
 	s.subs[sub] = struct{}{}
 	if s.active != nil {
+		if afterSeq == nil {
+			h.pendingApproval(ctx, sub, s.active)
+		}
 		sub.Deliver(runMsg(s.active))
 	}
 	return nil
+}
+
+// pendingApproval delivers the approval.requested event of a run waiting for approval, again, with its original seq.
+// A subscriber without after_seq has none of the session's events: it would see the wait but not the request it
+// can answer. With after_seq the replay already carries it, or the client saw it live. Session lock held.
+func (h *Hub) pendingApproval(ctx context.Context, sub Subscriber, rs *runState) {
+	if rs.status != protocol.StatusWaitingForApproval {
+		return
+	}
+	e, err := h.store.LastEvent(ctx, rs.sessionID, rs.id, protocol.KindApprovalRequested)
+	switch {
+	case err == nil:
+		sub.Deliver(eventMsg(e))
+	case !errors.Is(err, store.ErrNotFound):
+		h.log.Error("reading the pending approval failed", "session_id", rs.sessionID, "run_id", rs.id, "err", err.Error())
+	}
 }
 
 // Unsubscribe removes sub from a session.

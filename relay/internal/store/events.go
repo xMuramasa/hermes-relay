@@ -112,6 +112,21 @@ func (s *Store) EventsAfter(ctx context.Context, sessionID string, after int64, 
 	return out, nil
 }
 
+// LastEvent returns a run's newest stored event of kind, or ErrNotFound.
+func (s *Store) LastEvent(ctx context.Context, sessionID, runID, kind string) (Event, error) {
+	e := Event{SessionID: sessionID, RunID: runID, Kind: kind}
+	var data string
+	err := s.db.QueryRowContext(ctx, `SELECT seq, data, ts FROM events WHERE session_id = ? AND run_id = ? AND kind = ?
+		ORDER BY seq DESC LIMIT 1`, sessionID, runID, kind).Scan(&e.Seq, &data, &e.TS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, ErrNotFound
+	} else if err != nil {
+		return Event{}, err
+	}
+	e.Data = []byte(data)
+	return e, nil
+}
+
 // Run is a Hermes run started through the relay.
 type Run struct {
 	RunID       string

@@ -367,6 +367,58 @@ func TestApproveOnceAndSession(t *testing.T) {
 	}
 }
 
+// A device that subscribes while a run waits for approval gets the request (#18): without after_seq the pending
+// approval.requested event comes again, with its original seq, before the run status, and the device can answer it.
+// A subscribe whose after_seq already covers it gets no repeat.
+func TestLateSubscriberGetsPendingApproval(t *testing.T) {
+	fake := newFake(t, "approval")
+	r := newRelay(t, fake)
+	a := r.connect(r.pair("pixel-8"))
+	sid := fake.AddSession("api_server")
+	a.subscribe(sid)
+	_, ack := a.prompt(sid)
+	runID := ack.str("run_id")
+	got := a.until(func(m msg) bool { return m.str("type") == "run" && m.str("status") == "waiting_for_approval" })
+	var req msg
+	for _, m := range events(got) {
+		if m.str("kind") == "approval.requested" {
+			req = m
+		}
+	}
+	if req == nil {
+		t.Fatalf("no approval.requested before the wait: %v", got)
+	}
+	rid := req.data().str("request_id")
+
+	late := r.connect(r.pair("macbook"))
+	late.send(map[string]any{"type": "subscribe", "session_id": sid})
+	late.send(map[string]any{"type": "ping"})
+	got = late.until(isType("pong"))
+	if len(got) != 3 {
+		t.Fatalf("late subscriber got %v, want the pending request, the run status, pong", got)
+	}
+	if m := got[0]; m.str("kind") != "approval.requested" || m.num("seq") != req.num("seq") ||
+		m.str("run_id") != runID || m.data().str("request_id") != rid || m.data().str("command") != req.data().str("command") {
+		t.Fatalf("late subscriber, first message %v, want the pending request %v", m, req)
+	}
+	if m := got[1]; m.str("type") != "run" || m.str("status") != "waiting_for_approval" {
+		t.Fatalf("late subscriber, second message %v", m)
+	}
+
+	caughtUp := r.connect(r.pair("tablet"))
+	caughtUp.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": req.num("seq")})
+	caughtUp.send(map[string]any{"type": "ping"})
+	if got := caughtUp.until(isType("pong")); len(got) != 2 || got[0].str("type") != "run" || got[0].str("status") != "waiting_for_approval" {
+		t.Fatalf("subscriber with after_seq got %v, want the run status and pong (the request must not repeat)", got)
+	}
+
+	late.send(map[string]any{"type": "approve", "run_id": runID, "request_id": rid, "choice": "deny"})
+	late.until(isTerminal)
+	if _, approvals, _, _, _ := fake.Snapshot(); len(approvals) != 1 || approvals[0].RequestID != rid || approvals[0].Choice != "deny" {
+		t.Fatalf("approval calls %+v", approvals)
+	}
+}
+
 func TestOnlySubscribersControlRuns(t *testing.T) {
 	fake := newFake(t, "approval")
 	r := newRelay(t, fake)

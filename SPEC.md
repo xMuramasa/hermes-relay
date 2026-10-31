@@ -120,7 +120,9 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
   `approve {run_id, request_id, choice: once|session|deny}`, `ping`.
 - Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}` (`ts` in unix
   ms), `run {run_id, session_id, status}` (`running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`; live
-  only, and sent after a `subscribe` replay for the active run), `ack {client_msg_id, run_id, replayed}`,
+  only, and sent after a `subscribe` replay for the active run; a `subscribe` without `after_seq` to a run that is
+  `waiting_for_approval` first gets that run's pending `approval.requested` event again, with its original `seq`, so
+  a client that connects late can answer it), `ack {client_msg_id, run_id, replayed}`,
   `error {code, message, ref?}`, `pong`. Error codes: `unauthorized`, `bad_request`, `too_large`, `rate_limited`,
   `busy`, `not_found`, `read_only`, `replay_gap`, `hermes_unavailable`, `hermes_error`, `internal`. Field caps:
   prompt/steer text ≤ 32768 characters, ids ≤ 128 characters of `[A-Za-z0-9_.:-]`. Per-kind `data` is in the schema.
