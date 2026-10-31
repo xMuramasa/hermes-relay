@@ -309,6 +309,39 @@ func (c *Client) GetRun(ctx context.Context, runID string) (RunStatus, error) {
 	return out, nil
 }
 
+// ModelOptions is the part of GET /api/model/options the relay uses.
+type ModelOptions struct {
+	Model     string `json:"model"`
+	Provider  string `json:"provider"`
+	Providers []struct {
+		Slug         string   `json:"slug"`
+		Name         string   `json:"name"`
+		Models       []string `json:"models"`
+		Capabilities map[string]struct {
+			Reasoning bool `json:"reasoning"`
+		} `json:"capabilities"`
+	} `json:"providers"`
+}
+
+// GetModelOptions lists the models of the providers Hermes has credentials for.
+func (c *Client) GetModelOptions(ctx context.Context) (ModelOptions, error) {
+	var out ModelOptions
+	resp, err := c.Do(ctx, http.MethodGet, "/api/model/options", url.Values{"include_unconfigured": {"false"}}, nil, nil)
+	if err != nil {
+		return out, err
+	}
+	if json.Unmarshal(resp.Body, &out) != nil {
+		return out, &APIError{Status: http.StatusBadGateway}
+	}
+	return out, nil
+}
+
+// LockSessionModel stores a per-session model lock in Hermes.
+func (c *Client) LockSessionModel(ctx context.Context, sessionID, provider, model string) error {
+	return c.doJSON(ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sessionID)+"/model",
+		map[string]string{"provider": provider, "model": model}, nil, nil)
+}
+
 // Approve answers a pending approval.
 func (c *Client) Approve(ctx context.Context, runID, requestID, choice string) error {
 	body := map[string]any{"request_id": requestID, "choice": choice, "execution_generation": nil}

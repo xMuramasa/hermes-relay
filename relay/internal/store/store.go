@@ -71,6 +71,16 @@ var migrations = []string{
 		tag TEXT NOT NULL COLLATE NOCASE,
 		UNIQUE (session_id, tag)
 	);`,
+	// Handoff links (a straight chain: one older per newer, one newer per older) and per-session model choices.
+	`CREATE TABLE session_links (
+		session_id TEXT PRIMARY KEY,
+		continues TEXT NOT NULL UNIQUE CHECK (continues <> session_id)
+	);
+	CREATE TABLE session_models (
+		session_id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		model TEXT NOT NULL
+	);`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.

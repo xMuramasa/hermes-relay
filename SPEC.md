@@ -65,12 +65,20 @@ Checked on Hermes 0.22.2 (`/v1/capabilities`) and recorded in phase 0 (`probe/FI
 - Run controls: `GET /v1/runs/{id}` (`status` incl. `waiting_for_approval` with an `approval` object),
   `POST /v1/runs/{id}/approval {request_id, choice}` (`execution_generation` may be null), `POST /v1/runs/{id}/stop`,
   `POST /v1/runs/{id}/steer {text}` (only while `running`, else 409).
-- Later: `GET /api/model/options` for a model picker.
+- Models: `GET /api/model/options?include_unconfigured=false` (`{model, provider, providers: [{slug, name, models:
+  [ids], capabilities: {<id>: {fast, reasoning}}, authenticated, ...}]}`; ids may contain `[1m]`) and `POST
+  /api/sessions/{id}/model {provider, model}` (a persisted per-session lock; checked 2026-10-31 in
+  `gateway/platforms/api_server.py`: 404 unknown session, 400 no model/provider, 409 `model_lock_unavailable` for a
+  provider without a model, otherwise 200 `{object: "hermes.session.model_lock", session_id, runtime}`; Hermes does
+  not check the model against its catalog, the relay does). Only `/api/sessions/{id}/chat` reads that lock today;
+  `POST /v1/runs` does not (see Limits).
 
 Limits:
 - Hermes refuses turns in sessions another surface owns (Telegram, CLI…: 409). The relay only lets the phone send turns to
   `source: api_server` sessions; the others are listed and readable, and can be renamed, pinned and tagged (see REST).
-- Phone chats run on the main Hermes model and share the Claude usage limit with everything else.
+- Phone chats share the Claude usage limit with everything else. A chat's model choice (REST) is stored as Hermes'
+  session lock, but `POST /v1/runs` (how the relay starts turns) doesn't read it yet, so turns still run on the main
+  model until the relay passes `model`/`provider` with each run or Hermes applies the lock there.
 - No text streaming (see Decisions): the answer arrives with `run.completed`.
 
 ## Relay (`relay/`)
@@ -81,7 +89,7 @@ Limits:
 - One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
   [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log,
-  session tags.
+  session tags, handoff links and per-session model choices.
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
   nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
   `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
@@ -106,7 +114,7 @@ Limits:
 - Every device has a role: `viewer` (the default, and what devices paired before roles became) or `manager`.
   `pair --name mac --role manager` pairs a manager; `devices set-role <name> manager|viewer` changes a paired
   device's role, effective on its next request (no re-pairing, no restart); `devices list` shows it. Chat, prompts,
-  stop/steer, approvals and session list/create/rename/pin/delete/tags are open to both roles. Management endpoints (cron jobs,
+  stop/steer, approvals, models, handoff links and session list/create/rename/pin/delete/tags are open to both roles. Management endpoints (cron jobs,
   GitHub actions, stopping background agents; for the Mac app) are manager-only and answer viewers `403
   {"error": {"code": "forbidden", ...}}`. Roles are REST-only: the WebSocket messages (including `ready`) and
   `protocol/schema.json` don't carry them, since the Mac app decodes `ready` strictly.
@@ -127,6 +135,22 @@ Limits:
   Hermes (any source). A tag is trimmed, 1-32 characters, no control characters; duplicates are compared
   case-insensitively and the first spelling is kept; at most 10 per session (after dedupe). Ids of sessions deleted
   elsewhere (e.g. the nightly cron cleanup) may linger in `GET /api/tags`; apps ignore ids they don't list.
+- Models. `GET /api/models` → `{"current": {"provider", "model"}, "providers": [{"slug", "name", "models": [{"id",
+  "reasoning"}]}]}`: Hermes' connected providers only (`include_unconfigured=false`), cached 5 minutes (Hermes
+  errors are not cached and map as usual). `PUT /api/sessions/:id/model {"provider", "model"}`: the pair must be in
+  that list (else `bad_request`) and the session a relay chat (`api_server`; others get `read_only`, since the lock
+  would change another surface's conversation); the relay forwards Hermes' session lock, stores the choice and
+  answers `{"provider", "model"}`. `GET /api/session-models` → `{"sessions": {"<id>": {"provider", "model"}}}`;
+  sessions left out use `current`.
+- Handoff links: when a conversation grows too large the app starts a new one from a digest and shows both as one
+  thread. The link lives in the relay, not Hermes (Hermes' own compression children redirect the old id to the
+  child, which would hide the old messages). `PUT /api/sessions/:id/continues {"from": "<older id>"}` records that
+  `:id` continues the older conversation (replacing any earlier link of `:id`); both must exist in Hermes (any
+  source). Chains stay straight: a conversation continues at most one older one, each older one is continued at most
+  once, no self-links or loops, at most 32 links per chain; violations are `bad_request`. `{"from": null}` removes
+  the link (no existence check). Answers `{"from": ...}` as stored. `GET /api/links` → `{"continues": {"<newer>":
+  "<older>"}}`. Deleting a session through the relay drops the links on both sides of it (leaving two shorter
+  chains) and its model choice; ids deleted elsewhere may linger, as with tags.
 - `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited; the name comes from `pair --name`, a
   `name` in the body is ignored), `GET /healthz` (no auth, no details).
 - `GET /api/me` → `{device, role}` (the device's name and `manager` or `viewer`): how an app learns its role.
@@ -180,7 +204,7 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 ### Logging and limits
 
 - JSON lines to stdout (`log/slog`): device name, session and run ids, event counts, durations, Hermes status codes.
-  Never message text, approval commands, tokens, session titles or tags.
+  Never message text, approval commands, tokens, session titles, tags or digests.
 - 64 KB per WebSocket message (bigger closes the socket, 1009), 20 prompts a minute per device, at most 5 devices and
   3 sockets per device (a 4th closes the oldest), 10 pairing attempts a minute per client IP (30 overall), 4
   requests waiting on Hermes per socket. A socket that falls 8192 messages behind is closed; the app resubscribes.

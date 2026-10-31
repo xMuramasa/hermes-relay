@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -148,6 +149,31 @@ type Fake struct {
 	Steers      []string
 	Paths       []string // every request, "METHOD /path"
 	SessionPost []map[string]any
+	// ModelOptions is GET /api/model/options with ?include_unconfigured=true; false leaves out providers
+	// with "authenticated": false.
+	ModelOptions map[string]any
+	optionsFail  int
+	modelLocks   map[string][2]string // accepted POST /api/sessions/{id}/model, {provider, model}
+}
+
+// DefaultModelOptions is shaped like Hermes' answer (2026-10-31), trimmed to a few models.
+func DefaultModelOptions() map[string]any {
+	reasoning := map[string]any{"fast": false, "reasoning": true}
+	return map[string]any{
+		"model": "claude-opus-5-5[1m]", "provider": "claude-subscription-directsdk-experimental",
+		"providers": []any{
+			map[string]any{"slug": "claude-subscription-directsdk-experimental", "name": "Claude subscription",
+				"is_current": true, "is_user_defined": false, "models": []any{"claude-opus-5-5[1m]", "claude-sonnet-5-5"},
+				"total_models": 2, "source": "built-in", "authenticated": true, "featured_models": []any{},
+				"capabilities": map[string]any{"claude-opus-5-5[1m]": reasoning, "claude-sonnet-5-5": reasoning}},
+			map[string]any{"slug": "anthropic", "name": "Anthropic", "is_current": false, "models": []any{"claude-haiku-5-5"},
+				"total_models": 1, "source": "built-in", "authenticated": true,
+				"capabilities": map[string]any{"claude-haiku-5-5": map[string]any{"fast": true, "reasoning": false}}},
+			map[string]any{"slug": "copilot", "name": "GitHub Copilot", "is_current": false, "models": []any{"gpt-5.5"},
+				"total_models": 1, "source": "built-in", "authenticated": true, "capabilities": map[string]any{}},
+			map[string]any{"slug": "openrouter", "name": "OpenRouter", "models": []any{"some/model"}, "authenticated": false},
+		},
+	}
 }
 
 // New starts a fake Hermes. Close it with t.Cleanup(f.Close).
@@ -155,7 +181,8 @@ func New(key string, def *Fixture) *Fake {
 	f := &Fake{
 		Key: key, KeepAlive: 50 * time.Millisecond,
 		sessions: map[string]*Session{}, runs: map[string]*Run{}, idem: map[string]string{}, scripts: map[string]Script{},
-		Default: Script{Fixture: def, FromStart: true},
+		Default:      Script{Fixture: def, FromStart: true},
+		ModelOptions: DefaultModelOptions(), modelLocks: map[string][2]string{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	f.URL = f.srv.URL
@@ -250,6 +277,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("PATCH /api/sessions/{id}", f.patchSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", f.deleteSession)
 	mux.HandleFunc("GET /api/sessions/{id}/messages", f.messages)
+	mux.HandleFunc("POST /api/sessions/{id}/model", f.lockModel)
+	mux.HandleFunc("GET /api/model/options", f.modelOptions)
 	mux.HandleFunc("POST /v1/runs", f.createRun)
 	mux.HandleFunc("GET /v1/runs/{id}", f.getRun)
 	mux.HandleFunc("GET /v1/runs/{id}/events", f.events)
@@ -360,6 +389,101 @@ func (f *Fake) messages(w http.ResponseWriter, r *http.Request) {
 	if s := f.session(w, r); s != nil {
 		writeJSON(w, 200, map[string]any{"object": "list", "session_id": s.ID, "data": []any{},
 			"pagination": map[string]any{"limit": 500, "offset": 0, "returned": 0}})
+	}
+}
+
+// FailModelOptions makes GET /api/model/options answer status (0 to stop).
+func (f *Fake) FailModelOptions(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.optionsFail = status
+}
+
+func (f *Fake) modelOptions(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.optionsFail != 0 {
+		writeJSON(w, f.optionsFail, map[string]any{"error": map[string]any{"code": "model_options_failed"}})
+		return
+	}
+	out := map[string]any{}
+	for k, v := range f.ModelOptions {
+		out[k] = v
+	}
+	if r.URL.Query().Get("include_unconfigured") == "false" {
+		var ps []any
+		for _, p := range f.ModelOptions["providers"].([]any) {
+			if p.(map[string]any)["authenticated"] != false {
+				ps = append(ps, p)
+			}
+		}
+		out["providers"] = ps
+	}
+	writeJSON(w, 200, out)
+}
+
+// ModelLock returns a session's accepted model lock, {provider, model}.
+func (f *Fake) ModelLock(id string) [2]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.modelLocks[id]
+}
+
+var prefixRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{2,64}$`)
+
+// cleanID is Hermes' _clean_runtime_id: trimmed, "" if too long or holding CR, LF or NUL.
+func cleanID(v any, maxLen int) string {
+	s := ""
+	if v != nil {
+		s = strings.TrimSpace(fmt.Sprint(v))
+	}
+	if len(s) > maxLen || strings.ContainsAny(s, "\r\n\x00") {
+		return ""
+	}
+	return s
+}
+
+// lockModel is Hermes' _handle_session_model_lock without model_routes aliases: {model|model_id,
+// provider|provider_id}, "provider::model" also accepted; the virtual model "hermes-agent" counts as none.
+func (f *Fake) lockModel(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.session(w, r)
+	if s == nil {
+		return
+	}
+	var body map[string]any
+	if json.NewDecoder(r.Body).Decode(&body) != nil || body == nil {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{"message": "Invalid JSON in request body"}})
+		return
+	}
+	or := func(a, b string) string {
+		if body[a] != nil && body[a] != "" {
+			return a
+		}
+		return b
+	}
+	model := cleanID(body[or("model", "model_id")], 200)
+	provider := cleanID(body[or("provider", "provider_id")], 80)
+	if p, m, ok := strings.Cut(model, "::"); ok && prefixRe.MatchString(p) && strings.TrimSpace(m) != "" {
+		model = strings.TrimSpace(m)
+		if provider == "" {
+			provider = p
+		}
+	}
+	if model == "hermes-agent" {
+		model = ""
+	}
+	switch {
+	case model == "" && provider == "":
+		writeJSON(w, 400, map[string]any{"error": map[string]any{"code": "missing_model"}})
+	case model == "":
+		writeJSON(w, 409, map[string]any{"error": map[string]any{"code": "model_lock_unavailable"}})
+	default:
+		f.modelLocks[s.ID] = [2]string{provider, model}
+		writeJSON(w, 200, map[string]any{"object": "hermes.session.model_lock", "session_id": s.ID,
+			"runtime": map[string]any{"provider": provider, "model": model, "route_source": "raw_request",
+				"requested": map[string]any{"provider": provider, "model": model}, "model_lock": "accepted"}})
 	}
 }
 

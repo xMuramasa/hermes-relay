@@ -288,6 +288,9 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request, dev store
 		if err := s.store.SetSessionTags(r.Context(), id, nil); err != nil {
 			s.log.Error("dropping tags failed", "session_id", id, "err", err.Error())
 		}
+		if err := s.store.ForgetSession(r.Context(), id); err != nil {
+			s.log.Error("dropping links and model failed", "session_id", id, "err", err.Error())
+		}
 		s.log.Info("session deleted", "session_id", id, "device", dev.Name)
 	}
 }

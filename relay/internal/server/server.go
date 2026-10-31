@@ -67,6 +67,7 @@ type Server struct {
 	validator *protocol.Validator
 
 	pairIP, pairAll, prompts *limiter
+	modelCache               modelCache
 
 	mu      sync.Mutex
 	closing bool
@@ -102,6 +103,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/messages", s.logged(s.authed(s.sessionMessages)))
 	mux.HandleFunc("PUT /api/sessions/{id}/tags", s.logged(s.authed(s.setTags)))
 	mux.HandleFunc("GET /api/tags", s.logged(s.authed(s.listTags)))
+	mux.HandleFunc("GET /api/models", s.logged(s.authed(s.listModels)))
+	mux.HandleFunc("PUT /api/sessions/{id}/model", s.logged(s.authed(s.setSessionModel)))
+	mux.HandleFunc("GET /api/session-models", s.logged(s.authed(s.listSessionModels)))
+	mux.HandleFunc("PUT /api/sessions/{id}/continues", s.logged(s.authed(s.setContinues)))
+	mux.HandleFunc("GET /api/links", s.logged(s.authed(s.listLinks)))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

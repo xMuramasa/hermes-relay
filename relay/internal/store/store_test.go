@@ -314,13 +314,110 @@ func TestMigrationToTags(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	if v, _ := s.Version(); v != 3 {
+	if v, _ := s.Version(); v != len(migrations) {
 		t.Fatalf("version %d", v)
 	}
 	if d, err := s.DeviceByTokenHash(ctx, []byte{1, 2}); err != nil || d.Role != RoleManager {
 		t.Fatalf("old device: %+v %v", d, err)
 	}
 	if err := s.SetSessionTags(ctx, "s1", []string{"work"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionLinks(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	links := func() string {
+		t.Helper()
+		all, err := s.SessionLinks(ctx)
+		if err != nil || all == nil {
+			t.Fatal(all, err)
+		}
+		var out []string
+		for _, n := range []string{"b", "c", "d", "x"} {
+			if o, ok := all[n]; ok {
+				out = append(out, n+">"+o)
+			}
+		}
+		return strings.Join(out, ",")
+	}
+	for _, l := range [][2]string{{"b", "a"}, {"c", "b"}, {"c", "b"}} { // the same link twice is fine
+		if err := s.SetContinues(ctx, l[0], l[1], 32); err != nil {
+			t.Fatal(l, err)
+		}
+	}
+	for _, c := range []struct {
+		newer, older string
+		err          error
+	}{
+		{"d", "b", ErrLinkTaken}, {"a", "c", ErrLinkCycle}, {"a", "b", ErrLinkTaken}, {"d", "c", ErrChainTooLong},
+	} {
+		if err := s.SetContinues(ctx, c.newer, c.older, 2); !errors.Is(err, c.err) {
+			t.Fatalf("%s>%s: %v, want %v", c.newer, c.older, err, c.err)
+		}
+	}
+	if err := s.SetContinues(ctx, "x", "x", 32); err == nil {
+		t.Fatal("a self-link was stored")
+	}
+	// Re-pointing a link frees its old target.
+	if err := s.SetContinues(ctx, "c", "x", 32); err != nil || links() != "b>a,c>x" {
+		t.Fatal(links(), err)
+	}
+	if err := s.SetContinues(ctx, "d", "b", 32); err != nil || links() != "b>a,c>x,d>b" {
+		t.Fatal(links(), err)
+	}
+	// Deleting the middle of a>b>d keeps a and d, unlinked; the model choice goes too.
+	if err := s.SetSessionModel(ctx, "b", SessionModel{"anthropic", "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionModel(ctx, "b", SessionModel{"copilot", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := s.SessionModels(ctx); err != nil || m["b"] != (SessionModel{"copilot", "m2"}) {
+		t.Fatal(m, err)
+	}
+	if err := s.ForgetSession(ctx, "b"); err != nil || links() != "c>x" {
+		t.Fatal(links(), err)
+	}
+	if m, _ := s.SessionModels(ctx); len(m) != 0 {
+		t.Fatal(m)
+	}
+	if err := s.SetContinues(ctx, "c", "", 32); err != nil || links() != "" {
+		t.Fatal(links(), err)
+	}
+}
+
+// A database from before links (version 3) keeps its tags and gets the links and models tables.
+func TestMigrationToLinks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{migrations[0], migrations[1], migrations[2], `PRAGMA user_version = 3`,
+		`INSERT INTO session_tags (session_id, tag) VALUES ('s1', 'work')`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if v, _ := s.Version(); v != 4 {
+		t.Fatalf("version %d", v)
+	}
+	if tags, err := s.SessionTags(ctx); err != nil || tags["s1"][0] != "work" {
+		t.Fatalf("old tags: %v %v", tags, err)
+	}
+	if err := s.SetContinues(ctx, "s2", "s1", 32); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionModel(ctx, "s2", SessionModel{"anthropic", "claude-opus-5-5[1m]"}); err != nil {
 		t.Fatal(err)
 	}
 }
