@@ -6,10 +6,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xMuramasa/trismegistus/relay/internal/pairing"
+	"github.com/xMuramasa/trismegistus/relay/internal/store"
 )
 
 func runCLI(t *testing.T, env map[string]string, args ...string) (int, string, string) {
@@ -62,6 +66,70 @@ func TestPairAndDevices(t *testing.T) {
 	}
 	if code, _, _ := runCLI(t, env, "devices", "frobnicate"); code != 2 {
 		t.Fatal("bad devices subcommand")
+	}
+}
+
+func TestRoles(t *testing.T) {
+	env := map[string]string{"DATA_DIR": t.TempDir(), "PUBLIC_URL": "https://relay.example"}
+	if code, _, errOut := runCLI(t, env, "pair", "--name", "macbook", "--role", "admin"); code != 2 || !strings.Contains(errOut, "--role") {
+		t.Fatalf("bad role: %d %q", code, errOut)
+	}
+	// Pair the way the app would: redeem the printed code.
+	redeem := func(out string) {
+		t.Helper()
+		_, rest, _ := strings.Cut(out, "Code:    ")
+		code, ok := pairing.NormalizeCode(strings.Fields(rest)[0])
+		if !ok {
+			t.Fatalf("no code in %q", out)
+		}
+		st, err := store.Open(filepath.Join(env["DATA_DIR"], "relay.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		_, hash := pairing.NewToken()
+		if _, err := st.RedeemPairCode(context.Background(), pairing.Hash(code), hash, 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, _ := runCLI(t, env, "pair", "--name", "macbook", "--role", "manager")
+	if code != 0 || !strings.Contains(out, "Role:    manager") {
+		t.Fatalf("pair manager: %d %q", code, out)
+	}
+	redeem(out)
+	code, out, _ = runCLI(t, env, "pair", "--name", "pixel-8")
+	if code != 0 || !strings.Contains(out, "Role:    viewer") {
+		t.Fatalf("pair default: %d %q", code, out)
+	}
+	redeem(out)
+	listed := func() string {
+		t.Helper()
+		code, out, _ := runCLI(t, env, "devices", "list")
+		if code != 0 || !strings.HasPrefix(out, "NAME     ROLE     PAIRED") {
+			t.Fatalf("list: %d %q", code, out)
+		}
+		return strings.Join(strings.Fields(out), " ")
+	}
+	if l := listed(); !strings.Contains(l, "macbook manager") || !strings.Contains(l, "pixel-8 viewer") {
+		t.Fatalf("list: %q", l)
+	}
+	if code, out, _ := runCLI(t, env, "devices", "set-role", "macbook", "viewer"); code != 0 || !strings.Contains(out, "now a viewer") {
+		t.Fatalf("set-role: %d %q", code, out)
+	}
+	if code, _, _ := runCLI(t, env, "devices", "set-role", "pixel-8", "manager"); code != 0 {
+		t.Fatal("set-role pixel-8")
+	}
+	if l := listed(); !strings.Contains(l, "macbook viewer") || !strings.Contains(l, "pixel-8 manager") {
+		t.Fatalf("list after set-role: %q", l)
+	}
+	if code, _, errOut := runCLI(t, env, "devices", "set-role", "macbook", "root"); code != 2 || !strings.Contains(errOut, "manager or viewer") {
+		t.Fatalf("bad role: %d %q", code, errOut)
+	}
+	if code, _, errOut := runCLI(t, env, "devices", "set-role", "nobody", "manager"); code != 1 || !strings.Contains(errOut, "no device") {
+		t.Fatalf("unknown device: %d %q", code, errOut)
+	}
+	if code, _, _ := runCLI(t, env, "devices", "set-role", "macbook"); code != 2 {
+		t.Fatal("set-role without a role")
 	}
 }
 

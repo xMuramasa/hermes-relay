@@ -32,7 +32,9 @@ const usage = `trismegistus-relay: relay between the Trismegistus app and Hermes
 Usage:
   trismegistus-relay [serve]                      run the relay (default)
   trismegistus-relay pair --name NAME [--replace] print a one-time pairing QR code for a new device
+                     [--role manager|viewer]      (default viewer: chat only, no management)
   trismegistus-relay devices list                 list paired devices
+  trismegistus-relay devices set-role NAME ROLE   make a device a manager or a viewer
   trismegistus-relay devices revoke NAME          revoke a device (its sockets close at once)
   trismegistus-relay healthcheck                  GET /healthz on RELAY_ADDR; exit 0 if healthy
   trismegistus-relay version                      print the version
@@ -169,7 +171,12 @@ func pair(ctx context.Context, cfg config.Config, args []string, stdout, stderr 
 	fs.SetOutput(stderr)
 	name := fs.String("name", "", "device name (letters, digits, . _ -)")
 	replace := fs.Bool("replace", false, "revoke an existing device with this name")
+	role := fs.String("role", store.RoleViewer, "manager or viewer")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	if !store.ValidRole(*role) {
+		fmt.Fprintln(stderr, "pair: --role must be manager or viewer")
 		return 2
 	}
 	if !pairing.ValidName(*name) {
@@ -187,7 +194,7 @@ func pair(ctx context.Context, cfg config.Config, args []string, stdout, stderr 
 	}
 	defer st.Close()
 	code, hash := pairing.NewCode()
-	revoked, err := st.CreatePairCode(ctx, *name, hash, pairing.CodeTTL, *replace, server.DefaultOptions().MaxDevices)
+	revoked, err := st.CreatePairCodeWithRole(ctx, *name, *role, hash, pairing.CodeTTL, *replace, server.DefaultOptions().MaxDevices)
 	switch {
 	case errors.Is(err, store.ErrNameExists):
 		fmt.Fprintf(stderr, "pair: a device named %q exists; use --replace to revoke it and pair again\n", *name)
@@ -203,12 +210,15 @@ func pair(ctx context.Context, cfg config.Config, args []string, stdout, stderr 
 		fmt.Fprintf(stdout, "Revoked the old device %q.\n", *name)
 	}
 	pairing.Print(stdout, *name, cfg.PublicURL, code, time.Now().Add(pairing.CodeTTL))
+	fmt.Fprintf(stdout, "Role:    %s\n", *role)
 	return 0
 }
 
+const devicesUsage = "devices: use 'devices list', 'devices set-role NAME manager|viewer' or 'devices revoke NAME'\n"
+
 func devices(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "devices: use 'devices list' or 'devices revoke NAME'\n")
+		fmt.Fprint(stderr, devicesUsage)
 		return 2
 	}
 	st, err := openStore(cfg)
@@ -225,15 +235,29 @@ func devices(ctx context.Context, cfg config.Config, args []string, stdout, stde
 			return 1
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tPAIRED\tLAST SEEN")
+		fmt.Fprintln(tw, "NAME\tROLE\tPAIRED\tLAST SEEN")
 		for _, d := range list {
 			seen := "never"
 			if !d.LastSeenAt.IsZero() {
 				seen = d.LastSeenAt.Local().Format(time.DateTime)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", d.Name, d.CreatedAt.Local().Format(time.DateTime), seen)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Role, d.CreatedAt.Local().Format(time.DateTime), seen)
 		}
 		_ = tw.Flush()
+		return 0
+	case args[0] == "set-role" && len(args) == 3:
+		switch err := st.SetDeviceRole(ctx, args[1], args[2]); {
+		case errors.Is(err, store.ErrInvalidRole):
+			fmt.Fprintln(stderr, "devices: role must be manager or viewer")
+			return 2
+		case errors.Is(err, store.ErrNotFound):
+			fmt.Fprintf(stderr, "devices: no device named %q\n", args[1])
+			return 1
+		case err != nil:
+			fmt.Fprintf(stderr, "devices: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%q is now a %s. It applies to its next request.\n", args[1], args[2])
 		return 0
 	case args[0] == "revoke" && len(args) == 2:
 		if err := st.RevokeDevice(ctx, args[1]); errors.Is(err, store.ErrNotFound) {
@@ -246,7 +270,7 @@ func devices(ctx context.Context, cfg config.Config, args []string, stdout, stde
 		fmt.Fprintf(stdout, "Revoked %q. Its sockets close within seconds.\n", args[1])
 		return 0
 	default:
-		fmt.Fprint(stderr, "devices: use 'devices list' or 'devices revoke NAME'\n")
+		fmt.Fprint(stderr, devicesUsage)
 		return 2
 	}
 }

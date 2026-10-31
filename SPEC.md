@@ -75,8 +75,8 @@ Limits:
 - Go 1.27.3, one module in `relay/`. Dependencies kept to: `github.com/coder/websocket` (WebSocket),
   `modernc.org/sqlite` (pure-Go SQLite, no cgo), a QR-to-terminal package. Everything else is the standard library
   (`net/http`, `log/slog` JSON logs, `encoding/json`). Pinned in `go.mod`/`go.sum`.
-- One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>`,
-  `devices list`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
+- One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
+  [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log.
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
   nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
@@ -99,6 +99,13 @@ Limits:
 - `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once (the server checks every 2 s,
   since the CLI runs as another process on the same database).
 - The token never appears in chat, logs or the repo.
+- Every device has a role: `viewer` (the default, and what devices paired before roles became) or `manager`.
+  `pair --name mac --role manager` pairs a manager; `devices set-role <name> manager|viewer` changes a paired
+  device's role, effective on its next request (no re-pairing, no restart); `devices list` shows it. Chat, prompts,
+  stop/steer, approvals and session list/create/rename/delete are open to both roles. Management endpoints (cron jobs,
+  GitHub actions, stopping background agents; for the Mac app) are manager-only and answer viewers `403
+  {"error": {"code": "forbidden", ...}}`. Roles are REST-only: the WebSocket messages (including `ready`) and
+  `protocol/schema.json` don't carry them, since the Mac app decodes `ready` strictly.
 
 ### REST (device token as Bearer)
 
@@ -107,9 +114,11 @@ Limits:
   Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control, skills, admin).
 - `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited; the name comes from `pair --name`, a
   `name` in the body is ignored), `GET /healthz` (no auth, no details).
+- `GET /api/me` → `{device, role}` (the device's name and `manager` or `viewer`): how an app learns its role.
 - `POST /api/sessions` ignores the body and creates an untitled session. Only `limit`, `offset`, `order`, `source`
   (list) and `limit`, `offset`, `order`, `before`, `after` (messages) query parameters are passed on. Errors are
-  `{"error": {code, message}}` with the WebSocket error codes.
+  `{"error": {code, message}}` with the WebSocket error codes, plus the REST-only `forbidden` (HTTP 403: the
+  endpoint needs a `manager` device).
 
 ### WebSocket `/ws`
 

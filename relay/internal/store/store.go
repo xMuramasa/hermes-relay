@@ -62,6 +62,9 @@ var migrations = []string{
 		PRIMARY KEY (session_id, seq)
 	) WITHOUT ROWID;
 	CREATE INDEX events_created ON events(created_at);`,
+	// Roles: devices paired before this keep working as viewers.
+	`ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer' CHECK (role IN ('manager', 'viewer'));
+	ALTER TABLE pair_codes ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer' CHECK (role IN ('manager', 'viewer'));`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.
@@ -129,6 +132,7 @@ var (
 	ErrNameExists     = errors.New("a device with that name exists")
 	ErrTooManyDevices = errors.New("device limit reached")
 	ErrInvalidCode    = errors.New("invalid, used or expired pairing code")
+	ErrInvalidRole    = errors.New("role must be manager or viewer")
 )
 
 // Retention is how long events, finished runs and used codes are kept.

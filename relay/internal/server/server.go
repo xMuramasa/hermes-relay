@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /api/pair", s.logged(s.handlePair))
+	mux.HandleFunc("GET /api/me", s.logged(s.authed(s.handleMe)))
 	mux.HandleFunc("GET /api/sessions", s.logged(s.authed(s.listSessions)))
 	mux.HandleFunc("POST /api/sessions", s.logged(s.authed(s.createSession)))
 	mux.HandleFunc("GET /api/sessions/{id}", s.logged(s.authed(s.getSession)))
@@ -192,6 +193,7 @@ var statusOf = map[string]int{
 	protocol.CodeBusy:              http.StatusConflict,
 	protocol.CodeNotFound:          http.StatusNotFound,
 	protocol.CodeReadOnly:          http.StatusForbidden,
+	codeForbidden:                  http.StatusForbidden,
 	protocol.CodeReplayGap:         http.StatusGone,
 	protocol.CodeHermesUnavailable: http.StatusServiceUnavailable,
 	protocol.CodeHermesError:       http.StatusBadGateway,

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -184,5 +185,79 @@ func TestEventsNumberingReplayAndCleanup(t *testing.T) {
 	}
 	if out := add(1, -1, ""); out[0].Seq != 4 {
 		t.Fatalf("numbering must continue after cleanup, got %d", out[0].Seq)
+	}
+}
+
+func TestRoles(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if _, err := s.CreatePairCodeWithRole(ctx, "mac", "admin", []byte("c0"), time.Minute, false, 5); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("bad role: %v", err)
+	}
+	if _, err := s.CreatePairCodeWithRole(ctx, "mac", RoleManager, []byte("c1"), time.Minute, false, 5); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.RedeemPairCode(ctx, []byte("c1"), []byte("t1"), 5); err != nil || d.Role != RoleManager {
+		t.Fatalf("redeem manager: %+v %v", d, err)
+	}
+	if _, err := s.CreatePairCode(ctx, "phone", []byte("c2"), time.Minute, false, 5); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.RedeemPairCode(ctx, []byte("c2"), []byte("t2"), 5); err != nil || d.Role != RoleViewer {
+		t.Fatalf("redeem default: %+v %v", d, err)
+	}
+	if d, _ := s.DeviceByTokenHash(ctx, []byte("t1")); d.Role != RoleManager {
+		t.Fatalf("lookup: %+v", d)
+	}
+	if err := s.SetDeviceRole(ctx, "mac", RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDeviceRole(ctx, "phone", RoleManager); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDeviceRole(ctx, "nobody", RoleManager); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown device: %v", err)
+	}
+	if err := s.SetDeviceRole(ctx, "mac", "root"); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("bad role: %v", err)
+	}
+	list, _ := s.ListDevices(ctx)
+	if len(list) != 2 || list[0].Role != RoleViewer || list[1].Role != RoleManager {
+		t.Fatalf("list %+v", list)
+	}
+}
+
+// A database from before roles keeps its devices (as viewers) and its unused pairing codes.
+func TestMigrationToRoles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{migrations[0], `PRAGMA user_version = 1`,
+		`INSERT INTO devices (name, token_hash, created_at) VALUES ('macbook', x'0102', 1)`,
+		`INSERT INTO pair_codes (code_hash, name, created_at, expires_at) VALUES (x'0304', 'pixel', 1, 9999999999999)`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if d, err := s.DeviceByTokenHash(ctx, []byte{1, 2}); err != nil || d.Name != "macbook" || d.Role != RoleViewer {
+		t.Fatalf("old device: %+v %v", d, err)
+	}
+	if d, err := s.RedeemPairCode(ctx, []byte{3, 4}, []byte{5, 6}, 5); err != nil || d.Role != RoleViewer {
+		t.Fatalf("old code: %+v %v", d, err)
+	}
+	if err := s.SetDeviceRole(ctx, "macbook", RoleManager); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE devices SET role = 'root'`); err == nil {
+		t.Fatal("the role column accepts unknown roles")
 	}
 }

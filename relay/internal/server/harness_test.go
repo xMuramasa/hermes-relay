@@ -182,9 +182,15 @@ func (r *relay) restart() *relay {
 // pair makes a pairing code (as the CLI does) and redeems it over HTTP. It returns the token.
 func (r *relay) pair(name string) string {
 	r.t.Helper()
+	return r.pairAs(name, store.RoleViewer)
+}
+
+// pairAs pairs a device with the given role.
+func (r *relay) pairAs(name, role string) string {
+	r.t.Helper()
 	code, hash := pairing.NewCode()
 	secret(code, "pairing code")
-	if _, err := r.st.CreatePairCode(context.Background(), name, hash, pairing.CodeTTL, false, 5); err != nil {
+	if _, err := r.st.CreatePairCodeWithRole(context.Background(), name, role, hash, pairing.CodeTTL, false, 5); err != nil {
 		r.t.Fatal(err)
 	}
 	status, body := r.do("POST", "/api/pair", "", map[string]any{"code": code})
@@ -232,6 +238,36 @@ func (r *relay) doHeaders(method, path, token string, body any, hdr map[string]s
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, b
+}
+
+// Roles are REST-only: ready is byte-for-byte the same for both roles (the Mac app decodes it strictly).
+func TestReadyUnchangedByRoles(t *testing.T) {
+	r := newRelay(t, newFake(t, "plain"))
+	for _, role := range []string{store.RoleManager, store.RoleViewer} {
+		name := "dev-" + role
+		want := `{"type":"ready","device":"` + name + `","server_version":"test"}`
+		if got := r.readyFor(r.pairAs(name, role)); got != want {
+			t.Fatalf("%s: ready = %s, want %s", role, got, want)
+		}
+	}
+}
+
+// readyFor authenticates a fresh socket and returns the relay's first message verbatim.
+func (r *relay) readyFor(token string) string {
+	r.t.Helper()
+	c := r.dialRaw()
+	defer c.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	b, _ := json.Marshal(map[string]any{"type": "auth", "token": token})
+	if err := c.Write(ctx, websocket.MessageText, b); err != nil {
+		r.t.Fatal(err)
+	}
+	_, got, err := c.Read(ctx)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return string(got)
 }
 
 // client is a test WebSocket client; every message it receives must match the schema.

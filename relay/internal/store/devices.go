@@ -8,10 +8,20 @@ import (
 	"time"
 )
 
+// Device roles. A manager may use the management endpoints; chat, approvals and sessions are open to both.
+const (
+	RoleManager = "manager"
+	RoleViewer  = "viewer"
+)
+
+// ValidRole reports whether r is a known role.
+func ValidRole(r string) bool { return r == RoleManager || r == RoleViewer }
+
 // Device is a paired phone. The token itself is never stored, only its SHA-256.
 type Device struct {
 	ID         int64
 	Name       string
+	Role       string
 	CreatedAt  time.Time
 	LastSeenAt time.Time // zero if never seen
 }
@@ -23,10 +33,18 @@ func msTime(v sql.NullInt64) time.Time {
 	return time.UnixMilli(v.Int64)
 }
 
-// CreatePairCode stores a one-time code (hashed) for a new device called name. If a device with that name exists,
-// it fails with ErrNameExists unless replace is set, in which case the old device is revoked. Other unused codes for
-// the same name are dropped.
+// CreatePairCode is CreatePairCodeWithRole for a viewer.
 func (s *Store) CreatePairCode(ctx context.Context, name string, codeHash []byte, ttl time.Duration, replace bool, maxDevices int) (revoked bool, err error) {
+	return s.CreatePairCodeWithRole(ctx, name, RoleViewer, codeHash, ttl, replace, maxDevices)
+}
+
+// CreatePairCodeWithRole stores a one-time code (hashed) for a new device called name with the given role. If a
+// device with that name exists, it fails with ErrNameExists unless replace is set, in which case the old device is
+// revoked. Other unused codes for the same name are dropped.
+func (s *Store) CreatePairCodeWithRole(ctx context.Context, name, role string, codeHash []byte, ttl time.Duration, replace bool, maxDevices int) (revoked bool, err error) {
+	if !ValidRole(role) {
+		return false, ErrInvalidRole
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -56,8 +74,8 @@ func (s *Store) CreatePairCode(ctx context.Context, name string, codeHash []byte
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pair_codes WHERE name = ? AND used_at IS NULL`, name); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO pair_codes (code_hash, name, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		codeHash, name, now, now+ttl.Milliseconds()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pair_codes (code_hash, name, role, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		codeHash, name, role, now, now+ttl.Milliseconds()); err != nil {
 		return false, err
 	}
 	return revoked, tx.Commit()
@@ -72,9 +90,9 @@ func (s *Store) RedeemPairCode(ctx context.Context, codeHash, tokenHash []byte, 
 	}
 	defer tx.Rollback()
 	now := s.ms()
-	var name string
-	err = tx.QueryRowContext(ctx, `SELECT name FROM pair_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`,
-		codeHash, now).Scan(&name)
+	var name, role string
+	err = tx.QueryRowContext(ctx, `SELECT name, role FROM pair_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`,
+		codeHash, now).Scan(&name, &role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrInvalidCode
 	} else if err != nil {
@@ -100,7 +118,7 @@ func (s *Store) RedeemPairCode(ctx context.Context, codeHash, tokenHash []byte, 
 		}
 		return Device{}, failure
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO devices (name, token_hash, created_at) VALUES (?, ?, ?)`, name, tokenHash, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO devices (name, role, token_hash, created_at) VALUES (?, ?, ?, ?)`, name, role, tokenHash, now)
 	if err != nil {
 		return Device{}, err
 	}
@@ -108,7 +126,7 @@ func (s *Store) RedeemPairCode(ctx context.Context, codeHash, tokenHash []byte, 
 	if err := tx.Commit(); err != nil {
 		return Device{}, err
 	}
-	return Device{ID: id, Name: name, CreatedAt: time.UnixMilli(now)}, nil
+	return Device{ID: id, Name: name, Role: role, CreatedAt: time.UnixMilli(now)}, nil
 }
 
 // DeviceByTokenHash finds the device owning a token.
@@ -117,8 +135,8 @@ func (s *Store) DeviceByTokenHash(ctx context.Context, tokenHash []byte) (Device
 	var created int64
 	var seen sql.NullInt64
 	var stored []byte
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, token_hash, created_at, last_seen_at FROM devices WHERE token_hash = ?`,
-		tokenHash).Scan(&d.ID, &d.Name, &stored, &created, &seen)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, role, token_hash, created_at, last_seen_at FROM devices WHERE token_hash = ?`,
+		tokenHash).Scan(&d.ID, &d.Name, &d.Role, &stored, &created, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrNotFound
 	} else if err != nil {
@@ -141,7 +159,7 @@ func (s *Store) TouchDevice(ctx context.Context, id int64) error {
 
 // ListDevices returns all devices by name.
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at, last_seen_at FROM devices ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, role, created_at, last_seen_at FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +169,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		var created int64
 		var seen sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.Name, &created, &seen); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Role, &created, &seen); err != nil {
 			return nil, err
 		}
 		d.CreatedAt, d.LastSeenAt = time.UnixMilli(created), msTime(seen)
@@ -181,6 +199,21 @@ func (s *Store) DeviceIDs(ctx context.Context) (map[int64]bool, error) {
 // RevokeDevice deletes a device by name.
 func (s *Store) RevokeDevice(ctx context.Context, name string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDeviceRole changes a device's role by name. It applies to the device's next request.
+func (s *Store) SetDeviceRole(ctx context.Context, name, role string) error {
+	if !ValidRole(role) {
+		return ErrInvalidRole
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET role = ? WHERE name = ?`, role, name)
 	if err != nil {
 		return err
 	}
