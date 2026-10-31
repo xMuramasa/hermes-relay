@@ -97,9 +97,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.logged(s.authed(s.listSessions)))
 	mux.HandleFunc("POST /api/sessions", s.logged(s.authed(s.createSession)))
 	mux.HandleFunc("GET /api/sessions/{id}", s.logged(s.authed(s.getSession)))
-	mux.HandleFunc("PATCH /api/sessions/{id}", s.logged(s.authed(s.renameSession)))
+	mux.HandleFunc("PATCH /api/sessions/{id}", s.logged(s.authed(s.updateSession)))
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.logged(s.authed(s.deleteSession)))
 	mux.HandleFunc("GET /api/sessions/{id}/messages", s.logged(s.authed(s.sessionMessages)))
+	mux.HandleFunc("PUT /api/sessions/{id}/tags", s.logged(s.authed(s.setTags)))
+	mux.HandleFunc("GET /api/tags", s.logged(s.authed(s.listTags)))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

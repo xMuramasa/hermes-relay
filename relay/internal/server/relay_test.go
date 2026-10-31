@@ -548,10 +548,11 @@ func TestReadOnlySessions(t *testing.T) {
 	if status, _ := r.do("GET", "/api/sessions/"+tg+"/messages", token, nil); status != 200 {
 		t.Fatalf("reading a telegram session: %d", status)
 	}
-	if status, body := r.do("PATCH", "/api/sessions/"+tg, token, map[string]any{"title": "mine"}); status != 403 || !strings.Contains(string(body), "read_only") {
+	// Read-only means no prompts and no delete; renaming and pinning are allowed (#23).
+	if status, body := r.do("PATCH", "/api/sessions/"+tg, token, map[string]any{"title": "mine"}); status != 200 {
 		t.Fatalf("rename telegram session: %d %s", status, body)
 	}
-	if status, _ := r.do("DELETE", "/api/sessions/"+tg, token, nil); status != 403 {
+	if status, body := r.do("DELETE", "/api/sessions/"+tg, token, nil); status != 403 || !strings.Contains(string(body), "read_only") {
 		t.Fatalf("delete telegram session: %d", status)
 	}
 	if status, _ := r.do("GET", "/api/sessions/"+tg, token, nil); status != 200 {

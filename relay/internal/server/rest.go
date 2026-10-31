@@ -205,62 +205,89 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request, _ store
 	s.relay(w, resp, err)
 }
 
-// writable allows changes only to sessions the API server owns.
-func (s *Server) writable(w http.ResponseWriter, r *http.Request, id string) bool {
+// sessionSource looks up a session's source in Hermes (cached), which also checks it exists.
+func (s *Server) sessionSource(w http.ResponseWriter, r *http.Request, id string) (string, bool) {
 	src, err := s.hub.SessionSource(r.Context(), id)
 	if err != nil {
 		writeError(w, hermes.ProtocolError(err), hermes.RetryAfterOf(err))
-		return false
+		return "", false
 	}
-	if src != hub.SourceAPIServer {
-		writeError(w, protocol.Errorf(protocol.CodeReadOnly, "this session is read-only here"), 0)
-		return false
-	}
-	return true
+	return src, true
 }
 
-func (s *Server) renameSession(w http.ResponseWriter, r *http.Request, dev store.Device) {
+// canDelete is an allowlist of sources, so new messaging platforms stay protected; Telegram is the main chat's memory.
+func canDelete(source string) bool {
+	return source == hub.SourceAPIServer || source == "cron" || source == "cli"
+}
+
+// updateSession renames and/or pins any session. Only title and pinned reach Hermes.
+func (s *Server) updateSession(w http.ResponseWriter, r *http.Request, dev store.Device) {
 	id, ok := sessionID(w, r)
 	if !ok {
 		return
 	}
 	var body struct {
-		Title string `json:"title"`
+		Title  *string `json:"title"`
+		Pinned *bool   `json:"pinned"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		writeError(w, err, 0)
 		return
 	}
-	body.Title = strings.TrimSpace(body.Title)
-	if body.Title == "" || utf8.RuneCountInString(body.Title) > 200 || !utf8.ValidString(body.Title) {
-		writeError(w, protocol.Errorf(protocol.CodeBadRequest, "title must be 1-200 characters"), 0)
+	patch := map[string]any{}
+	if body.Title != nil {
+		title := strings.TrimSpace(*body.Title)
+		if title == "" || utf8.RuneCountInString(title) > 200 || !utf8.ValidString(title) {
+			writeError(w, protocol.Errorf(protocol.CodeBadRequest, "title must be 1-200 characters"), 0)
+			return
+		}
+		patch["title"] = title
+	}
+	if body.Pinned != nil {
+		patch["pinned"] = *body.Pinned
+	}
+	if len(patch) == 0 {
+		writeError(w, protocol.Errorf(protocol.CodeBadRequest, "send title and/or pinned"), 0)
 		return
 	}
-	if !s.writable(w, r, id) {
-		return
-	}
-	b, _ := json.Marshal(map[string]string{"title": body.Title})
+	b, _ := json.Marshal(patch)
 	resp, err := s.hermes.Do(r.Context(), http.MethodPatch, "/api/sessions/"+url.PathEscape(id), nil, b, nil)
 	if s.relay(w, resp, err) {
-		s.log.Info("session renamed", "session_id", id, "device", dev.Name)
+		s.log.Info("session updated", "session_id", id, "device", dev.Name)
 	}
 }
+
+const turnActive = "a run is still writing to this session; try again when it ends"
 
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request, dev store.Device) {
 	id, ok := sessionID(w, r)
 	if !ok {
 		return
 	}
-	if !s.writable(w, r, id) {
+	src, ok := s.sessionSource(w, r, id)
+	if !ok {
+		return
+	}
+	if !canDelete(src) {
+		writeError(w, protocol.Errorf(protocol.CodeReadOnly, "this session can't be deleted here"), 0)
 		return
 	}
 	if s.hub.ActiveRun(id) != "" {
-		writeError(w, protocol.Errorf(protocol.CodeBusy, "a run is active in this session"), 0)
+		writeError(w, protocol.Errorf(protocol.CodeBusy, turnActive), 0)
 		return
 	}
 	resp, err := s.hermes.Do(r.Context(), http.MethodDelete, "/api/sessions/"+url.PathEscape(id), nil, nil, nil)
+	// Hermes' 409 session_active_turn: a turn from another surface (cron, CLI) is writing to it.
+	if hermes.StatusOf(err) == http.StatusConflict {
+		s.log.Warn("hermes refused", "hermes_status", http.StatusConflict)
+		writeError(w, protocol.Errorf(protocol.CodeBusy, turnActive), 0)
+		return
+	}
 	if s.relay(w, resp, err) {
 		s.hub.ForgetSource(id)
+		if err := s.store.SetSessionTags(r.Context(), id, nil); err != nil {
+			s.log.Error("dropping tags failed", "session_id", id, "err", err.Error())
+		}
 		s.log.Info("session deleted", "session_id", id, "device", dev.Name)
 	}
 }

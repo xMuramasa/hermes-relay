@@ -65,6 +65,12 @@ var migrations = []string{
 	// Roles: devices paired before this keep working as viewers.
 	`ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer' CHECK (role IN ('manager', 'viewer'));
 	ALTER TABLE pair_codes ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer' CHECK (role IN ('manager', 'viewer'));`,
+	// Tags: the relay's own, Hermes has none. rowid keeps the order they were set in.
+	`CREATE TABLE session_tags (
+		session_id TEXT NOT NULL,
+		tag TEXT NOT NULL COLLATE NOCASE,
+		UNIQUE (session_id, tag)
+	);`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.

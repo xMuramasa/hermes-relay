@@ -49,9 +49,12 @@ phone app --WSS--> Caddy (hermes.lab) --> relay 172.18.0.1:8650 --HTTP/SSE--> He
 Checked on Hermes 0.22.2 (`/v1/capabilities`) and recorded in phase 0 (`probe/FINDINGS.md`, `probe/fixtures/`).
 
 - Sessions: `GET /api/sessions` (`{data: [...], has_more}`; every source: api_server, telegram, cli, cron…),
-  `POST /api/sessions {title?}` (titles must be unique, so the relay sends none), `GET/PATCH/DELETE
-  /api/sessions/{id}`, `GET /api/sessions/{id}/messages` (`{data: [{id, role, content, tool_calls, tool_name,
-  timestamp, ...}], pagination}`).
+  `POST /api/sessions {title?}` (titles must be unique, so the relay sends none), `GET /api/sessions/{id}`,
+  `PATCH /api/sessions/{id}` (accepts `title`, `pinned`, `archived`, `hidden`, `unread`, `end_reason`; unknown keys
+  are a 400; `pinned` is Hermes' durable keep flag, exempt from auto-prune, and the list carries it),
+  `DELETE /api/sessions/{id}` (hard delete; `{object: "hermes.session.deleted", id, deleted}`, or 409
+  `session_active_turn` while a turn is writing), `GET /api/sessions/{id}/messages` (`{data: [{id, role, content,
+  tool_calls, tool_name, timestamp, ...}], pagination}`).
 - Start a turn: `POST /v1/runs {input, session_id}` + `Idempotency-Key` → 202 `{run_id, status, replayed}`; the same
   key again returns the same run (`replayed: true`).
 - Live events: `GET /v1/runs/{id}/events` (SSE, frames `data: {event, run_id, timestamp, seq, ...}`, no `event:` line,
@@ -65,8 +68,8 @@ Checked on Hermes 0.22.2 (`/v1/capabilities`) and recorded in phase 0 (`probe/FI
 - Later: `GET /api/model/options` for a model picker.
 
 Limits:
-- Hermes refuses turns in sessions another surface owns (Telegram, CLI…: 409). The relay only lets the phone write to
-  `source: api_server` sessions; the others are listed and readable, read-only.
+- Hermes refuses turns in sessions another surface owns (Telegram, CLI…: 409). The relay only lets the phone send turns to
+  `source: api_server` sessions; the others are listed and readable, and can be renamed, pinned and tagged (see REST).
 - Phone chats run on the main Hermes model and share the Claude usage limit with everything else.
 - No text streaming (see Decisions): the answer arrives with `run.completed`.
 
@@ -77,7 +80,8 @@ Limits:
   (`net/http`, `log/slog` JSON logs, `encoding/json`). Pinned in `go.mod`/`go.sum`.
 - One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
   [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
-- Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log.
+- Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log,
+  session tags.
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
   nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
   `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
@@ -102,7 +106,7 @@ Limits:
 - Every device has a role: `viewer` (the default, and what devices paired before roles became) or `manager`.
   `pair --name mac --role manager` pairs a manager; `devices set-role <name> manager|viewer` changes a paired
   device's role, effective on its next request (no re-pairing, no restart); `devices list` shows it. Chat, prompts,
-  stop/steer, approvals and session list/create/rename/delete are open to both roles. Management endpoints (cron jobs,
+  stop/steer, approvals and session list/create/rename/pin/delete/tags are open to both roles. Management endpoints (cron jobs,
   GitHub actions, stopping background agents; for the Mac app) are manager-only and answer viewers `403
   {"error": {"code": "forbidden", ...}}`. Roles are REST-only: the WebSocket messages (including `ready`) and
   `protocol/schema.json` don't carry them, since the Mac app decodes `ready` strictly.
@@ -110,8 +114,19 @@ Limits:
 ### REST (device token as Bearer)
 
 - `GET /api/sessions`, `POST /api/sessions`, `GET /api/sessions/:id`, `GET /api/sessions/:id/messages`: passed to
-  Hermes. `PATCH /api/sessions/:id` (rename) and `DELETE /api/sessions/:id` only for `source: api_server` sessions.
-  Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control, skills, admin).
+  Hermes. Nothing else in Hermes' API is reachable through the relay (no artifacts, browser control, skills, admin).
+- `PATCH /api/sessions/:id {title?, pinned?}` (rename and/or pin, at least one): every source. The title is trimmed,
+  1-200 characters; `pinned` is a bool. Only these two keys are sent to Hermes; any other key is `bad_request`.
+- `DELETE /api/sessions/:id`: only sources `api_server`, `cron` and `cli` (an allowlist, so new messaging platforms
+  stay protected; Telegram is the main chat's memory); others get `read_only`. While a run is writing to the session
+  (the relay's own, or Hermes' 409 `session_active_turn` for another surface's turn) it answers `busy` (HTTP 409)
+  "a run is still writing to this session". A successful delete also drops the session's tags.
+- Tags are the relay's own (Hermes has none), so they follow every device. `GET /api/tags` →
+  `{"sessions": {"<id>": ["tag", ...]}}` (sessions without tags are left out). `PUT /api/sessions/:id/tags
+  {"tags": [...]}` replaces the set (`[]` clears it) and answers `{"tags": [...]}` as stored; the session must exist in
+  Hermes (any source). A tag is trimmed, 1-32 characters, no control characters; duplicates are compared
+  case-insensitively and the first spelling is kept; at most 10 per session (after dedupe). Ids of sessions deleted
+  elsewhere (e.g. the nightly cron cleanup) may linger in `GET /api/tags`; apps ignore ids they don't list.
 - `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited; the name comes from `pair --name`, a
   `name` in the body is ignored), `GET /healthz` (no auth, no details).
 - `GET /api/me` → `{device, role}` (the device's name and `manager` or `viewer`): how an app learns its role.
@@ -165,7 +180,7 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 ### Logging and limits
 
 - JSON lines to stdout (`log/slog`): device name, session and run ids, event counts, durations, Hermes status codes.
-  Never message text, approval commands or tokens.
+  Never message text, approval commands, tokens, session titles or tags.
 - 64 KB per WebSocket message (bigger closes the socket, 1009), 20 prompts a minute per device, at most 5 devices and
   3 sockets per device (a 4th closes the oldest), 10 pairing attempts a minute per client IP (30 overall), 4
   requests waiting on Hermes per socket. A socket that falls 8192 messages behind is closed; the app resubscribes.

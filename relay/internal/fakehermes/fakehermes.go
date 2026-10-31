@@ -92,6 +92,9 @@ type Session struct {
 	ID     string `json:"id"`
 	Source string `json:"source"`
 	Title  any    `json:"title"`
+	Pinned bool   `json:"pinned"`
+	// ActiveTurn makes DELETE answer 409 session_active_turn, as while another surface's turn is writing.
+	ActiveTurn bool `json:"-"`
 }
 
 // Run is a fake run.
@@ -294,24 +297,61 @@ func (f *Fake) getSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *Fake) patchSession(w http.ResponseWriter, r *http.Request) {
-	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body)
+// SetActiveTurn marks a session as having a turn in progress (see Session.ActiveTurn).
+func (f *Fake) SetActiveTurn(id string, on bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if s := f.session(w, r); s != nil {
-		s.Title = body["title"]
-		writeJSON(w, 200, map[string]any{"object": "hermes.session", "session": s})
+	f.sessions[id].ActiveTurn = on
+}
+
+// patchSession accepts Hermes' keys only; unknown ones are a 400, like the real server.
+func (f *Fake) patchSession(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeJSON(w, 400, map[string]any{"error": "bad json"})
+		return
 	}
+	for k := range body {
+		switch k {
+		case "title", "pinned", "archived", "hidden", "unread", "end_reason":
+		default:
+			writeJSON(w, 400, map[string]any{"error": "unknown field " + k})
+			return
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.session(w, r)
+	if s == nil {
+		return
+	}
+	if t, ok := body["title"]; ok {
+		s.Title = t
+	}
+	if p, ok := body["pinned"].(bool); ok {
+		s.Pinned = p
+	}
+	writeJSON(w, 200, map[string]any{"object": "hermes.session", "session": s})
 }
 
 func (f *Fake) deleteSession(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if s := f.session(w, r); s != nil {
-		delete(f.sessions, s.ID)
-		writeJSON(w, 200, map[string]any{"deleted": true})
+	s := f.session(w, r)
+	if s == nil {
+		return
 	}
+	busy := s.ActiveTurn
+	for _, run := range f.runs {
+		busy = busy || run.SessionID == s.ID && !run.terminal
+	}
+	if busy {
+		writeJSON(w, 409, map[string]any{"error": map[string]any{"code": "session_active_turn",
+			"message": "a turn is in progress in this session"}})
+		return
+	}
+	delete(f.sessions, s.ID)
+	writeJSON(w, 200, map[string]any{"object": "hermes.session.deleted", "id": s.ID, "deleted": true})
 }
 
 func (f *Fake) messages(w http.ResponseWriter, r *http.Request) {

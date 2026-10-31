@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -259,5 +260,67 @@ func TestMigrationToRoles(t *testing.T) {
 	}
 	if _, err := s.db.Exec(`UPDATE devices SET role = 'root'`); err == nil {
 		t.Fatal("the role column accepts unknown roles")
+	}
+}
+
+func TestSessionTags(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if all, err := s.SessionTags(ctx); err != nil || all == nil || len(all) != 0 {
+		t.Fatalf("empty: %v %v", all, err)
+	}
+	if err := s.SetSessionTags(ctx, "s1", []string{"Work", "ideas"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionTags(ctx, "s2", []string{"news"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionTags(ctx, "s1", []string{"zeta", "Alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	// Case-insensitive duplicates are refused (the server dedupes first) and leave the old set.
+	if err := s.SetSessionTags(ctx, "s2", []string{"x", "X"}); err == nil {
+		t.Fatal("a case-insensitive duplicate was stored")
+	}
+	all, err := s.SessionTags(ctx)
+	if err != nil || len(all) != 2 || strings.Join(all["s1"], ",") != "zeta,Alpha" || strings.Join(all["s2"], ",") != "news" {
+		t.Fatalf("after replace: %v %v", all, err)
+	}
+	if err := s.SetSessionTags(ctx, "s1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if all, _ := s.SessionTags(ctx); len(all) != 1 || all["s1"] != nil {
+		t.Fatalf("after drop: %v", all)
+	}
+}
+
+// A database from before tags (version 2) keeps its devices and gets the tags table.
+func TestMigrationToTags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{migrations[0], migrations[1], `PRAGMA user_version = 2`,
+		`INSERT INTO devices (name, token_hash, created_at, role) VALUES ('macbook', x'0102', 1, 'manager')`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if v, _ := s.Version(); v != 3 {
+		t.Fatalf("version %d", v)
+	}
+	if d, err := s.DeviceByTokenHash(ctx, []byte{1, 2}); err != nil || d.Role != RoleManager {
+		t.Fatalf("old device: %+v %v", d, err)
+	}
+	if err := s.SetSessionTags(ctx, "s1", []string{"work"}); err != nil {
+		t.Fatal(err)
 	}
 }
