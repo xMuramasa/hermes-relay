@@ -828,7 +828,7 @@ func TestRESTAllowlist(t *testing.T) {
 
 	_, _, _, _, before := fake.Snapshot()
 	for _, p := range []string{"/v1/runs", "/v1/capabilities", "/api/skills", "/api/model/options", "/api/sessions/" + sid + "/chat/stream",
-		"/api/sessions/" + sid + "/messages/1", "/api/sessions/a%2Fb", "/api/sessions/..%2Fv1", "/admin", "/api/jobs"} {
+		"/api/sessions/" + sid + "/messages/1", "/api/sessions/a%2Fb", "/api/sessions/..%2Fv1", "/admin", "/api/cron/fire"} {
 		for _, method := range []string{"GET", "POST"} {
 			if status, _ := r.do(method, p, token, map[string]any{}); status != 404 && status != 405 {
 				t.Errorf("%s %s: %d, want 404", method, p, status)

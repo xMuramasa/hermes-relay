@@ -12,9 +12,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Fixture is one recorded scenario.
@@ -94,6 +96,8 @@ type Session struct {
 	Source string `json:"source"`
 	Title  any    `json:"title"`
 	Pinned bool   `json:"pinned"`
+	// StartedAt is a unix time in seconds, like Hermes' started_at.
+	StartedAt any `json:"started_at,omitempty"`
 	// ActiveTurn makes DELETE answer 409 session_active_turn, as while another surface's turn is writing.
 	ActiveTurn bool `json:"-"`
 }
@@ -155,6 +159,10 @@ type Fake struct {
 	ModelOptions map[string]any
 	optionsFail  int
 	modelLocks   map[string][2]string // accepted POST /api/sessions/{id}/model, {provider, model}
+	jobs         map[string]map[string]any
+	jobOrder     []string
+	jobsFail     int
+	jobBodies    []map[string]any // bodies of POST and PATCH /api/jobs[/{id}], as received
 }
 
 // DefaultModelOptions is shaped like Hermes' answer (2026-10-31), trimmed to a few models.
@@ -183,7 +191,7 @@ func New(key string, def *Fixture) *Fake {
 		Key: key, KeepAlive: 50 * time.Millisecond,
 		sessions: map[string]*Session{}, runs: map[string]*Run{}, idem: map[string]string{}, scripts: map[string]Script{},
 		Default:      Script{Fixture: def, FromStart: true},
-		ModelOptions: DefaultModelOptions(), modelLocks: map[string][2]string{},
+		ModelOptions: DefaultModelOptions(), modelLocks: map[string][2]string{}, jobs: map[string]map[string]any{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	f.URL = f.srv.URL
@@ -286,19 +294,43 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("POST /v1/runs/{id}/approval", f.approve)
 	mux.HandleFunc("POST /v1/runs/{id}/stop", f.stop)
 	mux.HandleFunc("POST /v1/runs/{id}/steer", f.steer)
+	mux.HandleFunc("GET /api/jobs", f.listJobs)
+	mux.HandleFunc("POST /api/jobs", f.createJob)
+	mux.HandleFunc("GET /api/jobs/{id}", f.jobRoute)
+	mux.HandleFunc("PATCH /api/jobs/{id}", f.jobRoute)
+	mux.HandleFunc("DELETE /api/jobs/{id}", f.jobRoute)
+	mux.HandleFunc("POST /api/jobs/{id}/{action}", f.jobRoute)
 	mux.ServeHTTP(w, r)
 }
 
+// listSessions honors source, and limit/offset when given (Hermes defaults limit to 50; the fake to everything).
 func (f *Fake) listSessions(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	q := r.URL.Query()
 	data := []*Session{}
 	for _, id := range f.order {
-		if s := f.sessions[id]; s != nil {
+		if s := f.sessions[id]; s != nil && (q.Get("source") == "" || s.Source == q.Get("source")) {
 			data = append(data, s)
 		}
 	}
-	writeJSON(w, 200, map[string]any{"data": data, "has_more": false})
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	data = data[min(offset, len(data)):]
+	more := false
+	if limit, err := strconv.Atoi(q.Get("limit")); err == nil && limit < len(data) {
+		data, more = data[:limit], true
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "has_more": more})
+}
+
+// AddCronRun adds the session of one run of a cron job, as Hermes names it (stamp: YYYYMMDD_HHMMSS).
+func (f *Fake) AddCronRun(jobID, stamp string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := "cron_" + jobID + "_" + stamp
+	f.sessions[id] = &Session{ID: id, Source: "cron", Title: "run " + stamp, StartedAt: 1792800000.5}
+	f.order = append(f.order, id)
+	return id
 }
 
 func (f *Fake) createSession(w http.ResponseWriter, r *http.Request) {
@@ -776,4 +808,239 @@ func (f *Fake) events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// Cron jobs: Hermes' /api/jobs (gateway/platforms/api_server.py, 2026-11-01) with its validation, trimmed.
+
+var jobIDRe = regexp.MustCompile(`^[a-f0-9]{12}$`)
+
+// jobUpdateFields is Hermes' _UPDATE_ALLOWED_FIELDS; other keys in a PATCH are dropped.
+var jobUpdateFields = map[string]bool{"name": true, "schedule": true, "prompt": true, "deliver": true, "skills": true,
+	"skill": true, "repeat": true, "enabled": true}
+
+// FailJobs makes every /api/jobs call answer status (0 to stop); 501 is a Hermes without cron.
+func (f *Fake) FailJobs(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobsFail = status
+}
+
+// JobBodies returns the bodies of POST and PATCH /api/jobs[/{id}] as received.
+func (f *Fake) JobBodies() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.jobBodies...)
+}
+
+// Job returns a copy of a stored job, or nil.
+func (f *Fake) Job(id string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jobs[id] == nil {
+		return nil
+	}
+	c := map[string]any{}
+	for k, v := range f.jobs[id] {
+		c[k] = v
+	}
+	return c
+}
+
+// AddJob stores a job shaped like cron/jobs.py's record, with fields overriding the defaults; a string schedule is
+// parsed as a cron expression. It returns the id.
+func (f *Fake) AddJob(fields map[string]any) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addJobLocked(fields)
+}
+
+func (f *Fake) addJobLocked(fields map[string]any) string {
+	f.next++
+	id := fmt.Sprintf("%012x", f.next)
+	job := map[string]any{"id": id, "name": "job " + id, "prompt": "", "skills": []any{}, "skill": nil, "model": nil,
+		"provider": nil, "base_url": nil, "script": nil, "no_agent": false, "context_from": nil, "schedule": "0 9 * * *",
+		"repeat": map[string]any{"times": nil, "completed": 0}, "enabled": true, "state": "scheduled", "paused_at": nil,
+		"paused_reason": nil, "created_at": "2026-11-01T09:00:00+00:00", "next_run_at": "2026-11-02T09:00:00+00:00",
+		"last_run_at": nil, "last_status": nil, "last_error": nil, "last_delivery_error": nil, "failure_streak": 0,
+		"deliver": "local", "origin": map[string]any{"platform": "api_server", "chat_id": "secret-chat"},
+		"enabled_toolsets": nil, "workdir": nil}
+	for k, v := range fields {
+		job[k] = v
+	}
+	setSchedule(job)
+	f.jobs[id] = job
+	f.jobOrder = append(f.jobOrder, id)
+	return id
+}
+
+func setSchedule(job map[string]any) {
+	if s, ok := job["schedule"].(string); ok {
+		job["schedule"] = map[string]any{"kind": "cron", "expr": s, "display": s}
+		job["schedule_display"] = s
+	}
+}
+
+func jobErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]any{"error": msg})
+}
+
+// jobsDown answers the configured failure, if any.
+func (f *Fake) jobsDown(w http.ResponseWriter) bool {
+	if f.jobsFail != 0 {
+		jobErr(w, f.jobsFail, "Cron module not available")
+	}
+	return f.jobsFail != 0
+}
+
+func (f *Fake) listJobs(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jobsDown(w) {
+		return
+	}
+	all := r.URL.Query().Get("include_disabled") == "true"
+	jobs := []map[string]any{}
+	for _, id := range f.jobOrder {
+		if j := f.jobs[id]; j != nil && (all || j["enabled"] == true) {
+			c := map[string]any{"latest_execution": nil}
+			for k, v := range j {
+				c[k] = v
+			}
+			jobs = append(jobs, c)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobs})
+}
+
+// checkJobText is Hermes' name and prompt caps.
+func checkJobText(w http.ResponseWriter, body map[string]any) bool {
+	if n, ok := body["name"].(string); ok && utf8.RuneCountInString(n) > 200 {
+		jobErr(w, 400, "Name must be ≤ 200 characters")
+		return false
+	}
+	if p, ok := body["prompt"].(string); ok && utf8.RuneCountInString(p) > 5000 {
+		jobErr(w, 400, "Prompt must be ≤ 5000 characters")
+		return false
+	}
+	return true
+}
+
+func (f *Fake) createJob(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if json.NewDecoder(r.Body).Decode(&body) != nil || body == nil {
+		jobErr(w, 500, "invalid JSON")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jobsDown(w) {
+		return
+	}
+	f.jobBodies = append(f.jobBodies, body)
+	name, _ := body["name"].(string)
+	schedule, _ := body["schedule"].(string)
+	prompt, _ := body["prompt"].(string)
+	paused, hasPaused := body["paused"]
+	repeat, hasRepeat := body["repeat"].(float64)
+	switch {
+	case strings.TrimSpace(name) == "":
+		jobErr(w, 400, "Name is required")
+	case strings.TrimSpace(schedule) == "":
+		jobErr(w, 400, "Schedule is required")
+	case !checkJobText(w, body):
+	case body["repeat"] != nil && (!hasRepeat || repeat != float64(int(repeat)) || repeat < 1):
+		jobErr(w, 400, "Repeat must be a positive integer")
+	case hasPaused && paused != true && paused != false:
+		jobErr(w, 400, "paused must be a boolean.")
+	case body["paused_reason"] != nil && paused != true:
+		jobErr(w, 400, "paused_reason requires paused=True.")
+	case strings.TrimSpace(prompt) == "" && body["skills"] == nil:
+		jobErr(w, 400, "Cron job has nothing to run: the prompt is blank and no script or skill(s) are set. "+
+			"Provide a prompt, a script, or at least one skill.")
+	default:
+		fields := map[string]any{"name": strings.TrimSpace(name), "schedule": strings.TrimSpace(schedule),
+			"prompt": strings.TrimSpace(prompt), "enabled": paused != true}
+		for _, k := range []string{"deliver", "skills", "paused_reason"} {
+			if v, ok := body[k]; ok {
+				fields[k] = v
+			}
+		}
+		if paused == true {
+			fields["state"], fields["paused_at"], fields["next_run_at"] = "paused", "2026-11-01T10:00:00+00:00", nil
+		}
+		if hasRepeat {
+			fields["repeat"] = map[string]any{"times": repeat, "completed": 0}
+		}
+		writeJSON(w, 200, map[string]any{"job": f.jobs[f.addJobLocked(fields)]})
+	}
+}
+
+// jobRoute is GET/PATCH/DELETE /api/jobs/{id} and POST /api/jobs/{id}/pause|resume|run.
+func (f *Fake) jobRoute(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if r.Method == http.MethodPatch && (json.NewDecoder(r.Body).Decode(&body) != nil || body == nil) {
+		jobErr(w, 500, "invalid JSON")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jobsDown(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if !jobIDRe.MatchString(id) {
+		jobErr(w, 400, "Invalid job ID format")
+		return
+	}
+	if body != nil {
+		f.jobBodies = append(f.jobBodies, body)
+	}
+	job := f.jobs[id]
+	if job == nil {
+		jobErr(w, 404, "Job not found")
+		return
+	}
+	switch r.Method + " " + r.PathValue("action") {
+	case "GET ":
+	case "DELETE ":
+		delete(f.jobs, id)
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	case "PATCH ":
+		updates := map[string]any{}
+		for k, v := range body {
+			if jobUpdateFields[k] {
+				updates[k] = v
+			}
+		}
+		if len(updates) == 0 {
+			jobErr(w, 400, "No valid fields to update")
+			return
+		}
+		if !checkJobText(w, updates) {
+			return
+		}
+		if s, ok := updates["schedule"].(string); ok && strings.TrimSpace(s) == "never" {
+			// Hermes' update raises inside _job_response, which answers 500 with the message.
+			jobErr(w, 500, "Invalid schedule 'never'")
+			return
+		}
+		for k, v := range updates {
+			if k == "repeat" {
+				v = map[string]any{"times": v, "completed": 0}
+			}
+			job[k] = v
+		}
+		setSchedule(job)
+	case "POST pause":
+		job["enabled"], job["state"], job["paused_at"] = false, "paused", "2026-11-01T10:00:00+00:00"
+	case "POST resume":
+		job["enabled"], job["state"], job["paused_at"], job["paused_reason"] = true, "scheduled", nil, nil
+	case "POST run":
+		job["enabled"], job["state"], job["next_run_at"] = true, "scheduled", "2026-11-01T10:00:00+00:00"
+	default:
+		jobErr(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"job": job})
 }

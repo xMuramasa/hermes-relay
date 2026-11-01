@@ -108,6 +108,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/session-models", s.logged(s.authed(s.listSessionModels)))
 	mux.HandleFunc("PUT /api/sessions/{id}/continues", s.logged(s.authed(s.setContinues)))
 	mux.HandleFunc("GET /api/links", s.logged(s.authed(s.listLinks)))
+	// Cron jobs (jobs.go): every device reads, managers write.
+	manage := func(h func(http.ResponseWriter, *http.Request, store.Device)) http.HandlerFunc {
+		return s.logged(s.authed(requireRole(store.RoleManager, h)))
+	}
+	mux.HandleFunc("GET /api/jobs", s.logged(s.authed(s.listJobs)))
+	mux.HandleFunc("GET /api/jobs/{id}", s.logged(s.authed(s.getJob)))
+	mux.HandleFunc("GET /api/jobs/{id}/runs", s.logged(s.authed(s.jobRuns)))
+	mux.HandleFunc("POST /api/jobs", manage(s.createJob))
+	mux.HandleFunc("PATCH /api/jobs/{id}", manage(s.updateJob))
+	mux.HandleFunc("DELETE /api/jobs/{id}", manage(s.deleteJob))
+	mux.HandleFunc("POST /api/jobs/{id}/pause", manage(s.jobAction("pause")))
+	mux.HandleFunc("POST /api/jobs/{id}/resume", manage(s.jobAction("resume")))
+	mux.HandleFunc("POST /api/jobs/{id}/run", manage(s.jobAction("run")))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

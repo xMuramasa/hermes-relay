@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -353,6 +354,63 @@ func (c *Client) GetModelOptions(ctx context.Context) (ModelOptions, error) {
 func (c *Client) LockSessionModel(ctx context.Context, sessionID, provider, model string) error {
 	return c.doJSON(ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sessionID)+"/model",
 		map[string]string{"provider": provider, "model": model}, nil, nil)
+}
+
+// ErrorMessage is the text of a Hermes {"error": "..."} body (the cron jobs API's errors), capped, or "".
+func ErrorMessage(body []byte) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	msg := []rune(strings.ToValidUTF8(strings.TrimSpace(e.Error), ""))
+	return string(msg[:min(len(msg), 300)])
+}
+
+// CronRun is one run of a cron job: the session Hermes made for it.
+type CronRun struct {
+	ID        string `json:"id"`
+	StartedAt any    `json:"started_at"`
+	Title     any    `json:"title"`
+}
+
+const cronPage, cronPages = 200, 5
+
+// CronRuns lists a cron job's runs (its cron_<job id>_<YYYYMMDD_HHMMSS> sessions), newest first, at most limit.
+// shortcut: Hermes' session list has no id filter, so this pages the 1000 most recently active cron sessions; use a
+// filter if Hermes gets one.
+func (c *Client) CronRuns(ctx context.Context, jobID string, limit int) ([]CronRun, error) {
+	prefix := "cron_" + jobID + "_"
+	seen := map[string]bool{}
+	runs := []CronRun{}
+	for page := range cronPages {
+		q := url.Values{"source": {"cron"}, "limit": {strconv.Itoa(cronPage)}, "offset": {strconv.Itoa(page * cronPage)}}
+		resp, err := c.Do(ctx, http.MethodGet, "/api/sessions", q, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		var list struct {
+			Data    []CronRun `json:"data"`
+			HasMore bool      `json:"has_more"`
+		}
+		if json.Unmarshal(resp.Body, &list) != nil {
+			return nil, &APIError{Status: http.StatusBadGateway}
+		}
+		for _, r := range list.Data {
+			// Pinned sessions are back-filled on every page, hence seen.
+			if strings.HasPrefix(r.ID, prefix) && protocol.ValidID(r.ID) && !seen[r.ID] {
+				seen[r.ID] = true
+				runs = append(runs, r)
+			}
+		}
+		if !list.HasMore {
+			break
+		}
+	}
+	// The id ends in the start time, so it sorts by time.
+	slices.SortFunc(runs, func(a, b CronRun) int { return strings.Compare(b.ID, a.ID) })
+	return runs[:min(len(runs), limit)], nil
 }
 
 // Approve answers a pending approval.
