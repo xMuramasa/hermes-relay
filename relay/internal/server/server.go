@@ -193,7 +193,8 @@ func (s *Server) dropRevoked(ctx context.Context) {
 	}
 }
 
-// CloseSockets closes every WebSocket with "going away" (shutdown) and refuses new ones.
+// CloseSockets closes every WebSocket with "going away" (shutdown) and refuses new ones. It returns once each
+// socket's in-flight requests are done too, so a run started during shutdown is stored before the store closes.
 func (s *Server) CloseSockets() {
 	s.mu.Lock()
 	s.closing = true

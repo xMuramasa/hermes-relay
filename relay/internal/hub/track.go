@@ -43,8 +43,13 @@ func (h *Hub) track(rs *runState, resumed bool) {
 			case ctx.Err() != nil:
 				return
 			case err == nil && protocol.Terminal(st.Status):
-				h.finishFromStatus(rs, st)
-				return
+				if h.finishFromStatus(rs, st) == nil {
+					return
+				}
+				if !wait(nil) { // storing failed: poll again
+					return
+				}
+				continue
 			case err == nil:
 				h.syncStatus(rs, st)
 			case isNotFound(err):
@@ -64,13 +69,23 @@ func (h *Hub) track(rs *runState, resumed bool) {
 			}
 		}
 		fresh := 0
+		var storeErr error
 		stopped, err := h.hermes.Events(ctx, rs.id, func(f hermes.Frame) bool {
-			terminal, isNew := h.handleFrame(rs, f)
+			terminal, isNew, err := h.handleFrame(rs, f)
+			if err != nil {
+				storeErr = err
+				return true
+			}
 			if isNew {
 				fresh++
 			}
 			return terminal
 		})
+		if storeErr != nil {
+			// The frame was not stored and hermesSeq did not move: treat the stream as lost, so GET /v1/runs/{id}
+			// (or the next stream read) delivers it again.
+			stopped, err = false, storeErr
+		}
 		if stopped || ctx.Err() != nil {
 			return
 		}
@@ -104,42 +119,51 @@ func streamErr(err error) string {
 	}
 }
 
-// handleFrame maps and stores one frame. isNew is false for frames of another run or already handled.
-func (h *Hub) handleFrame(rs *runState, f hermes.Frame) (terminal, isNew bool) {
+// handleFrame maps and stores one frame. isNew is false for frames of another run or already handled. On a store
+// error the frame counts as not handled.
+func (h *Hub) handleFrame(rs *runState, f hermes.Frame) (terminal, isNew bool, err error) {
 	if f.RunID != "" && f.RunID != rs.id {
-		return false, false
+		return false, false, nil
 	}
 	if f.Seq >= 0 && f.Seq <= rs.hermesSeq {
-		return false, false
+		return false, false, nil
 	}
 	m := mapFrame(f, time.Now())
+	if err := h.emit(rs, m.events, store.RunUpdate{HermesSeq: f.Seq, Status: m.status}); err != nil {
+		return false, false, err
+	}
 	if m.status == protocol.StatusWaitingForApproval {
 		var rid string
 		_ = json.Unmarshal(f.Fields["request_id"], &rid)
 		rs.lastApproval = rid
 	}
-	h.emit(rs, m.events, store.RunUpdate{HermesSeq: f.Seq, Status: m.status})
 	if f.Seq >= 0 {
 		rs.hermesSeq = f.Seq
 	}
-	return m.terminal, true
+	return m.terminal, true, nil
 }
 
 func (h *Hub) reconnected(rs *runState, reason string) {
 	data, _ := json.Marshal(map[string]string{"reason": reason})
-	h.emit(rs, []store.NewEvent{{Kind: protocol.KindReconnected, Data: data, TS: time.Now().UnixMilli()}}, store.RunUpdate{HermesSeq: -1})
+	_ = h.emit(rs, []store.NewEvent{{Kind: protocol.KindReconnected, Data: data, TS: time.Now().UnixMilli()}}, store.RunUpdate{HermesSeq: -1})
 }
 
+// fail ends the run as failed. If that can't be stored the session is still freed; the database keeps the run in
+// progress, so the next start asks Hermes about it again.
 func (h *Hub) fail(rs *runState, msg string) {
 	data, _ := json.Marshal(map[string]string{"error": msg})
-	h.emit(rs, []store.NewEvent{{Kind: protocol.KindRunFailed, Data: data, TS: time.Now().UnixMilli()}},
-		store.RunUpdate{HermesSeq: -1, Status: protocol.StatusFailed})
+	if h.emit(rs, []store.NewEvent{{Kind: protocol.KindRunFailed, Data: data, TS: time.Now().UnixMilli()}},
+		store.RunUpdate{HermesSeq: -1, Status: protocol.StatusFailed}) != nil {
+		s := h.lockSession(rs.sessionID)
+		h.setStatus(s, rs, protocol.StatusFailed)
+		h.unlockSession(s)
+	}
 }
 
 // finishFromStatus ends a run from GET /v1/runs/{id}: the body has the same fields as the terminal frame.
-func (h *Hub) finishFromStatus(rs *runState, st hermes.RunStatus) {
+func (h *Hub) finishFromStatus(rs *runState, st hermes.RunStatus) error {
 	m := mapFrame(hermes.Frame{Event: "run." + st.Status, Seq: -1, Fields: st.Fields}, time.Now())
-	h.emit(rs, m.events, store.RunUpdate{HermesSeq: -1, Status: m.status})
+	return h.emit(rs, m.events, store.RunUpdate{HermesSeq: -1, Status: m.status})
 }
 
 // syncStatus catches up on what a lost stream may have hidden: a pending approval, or its resolution.
@@ -151,11 +175,10 @@ func (h *Hub) syncStatus(rs *runState, st hermes.RunStatus) {
 			return
 		}
 		m := mapFrame(hermes.Frame{Event: "approval.request", Seq: -1, Fields: fields}, time.Now())
-		if m.status != "" {
+		if m.status != "" && h.emit(rs, m.events, store.RunUpdate{HermesSeq: -1, Status: m.status}) == nil {
 			rs.lastApproval = st.Approval.RequestID
-			h.emit(rs, m.events, store.RunUpdate{HermesSeq: -1, Status: m.status})
 		}
 	case protocol.StatusRunning:
-		h.emit(rs, nil, store.RunUpdate{HermesSeq: -1, Status: protocol.StatusRunning})
+		_ = h.emit(rs, nil, store.RunUpdate{HermesSeq: -1, Status: protocol.StatusRunning})
 	}
 }

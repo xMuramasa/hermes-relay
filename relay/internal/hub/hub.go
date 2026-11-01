@@ -34,9 +34,20 @@ func DefaultOptions() Options {
 	return Options{PollMin: time.Second, PollMax: 30 * time.Second, GiveUp: 2 * time.Hour, MaxReplay: 5000}
 }
 
+// eventStore is the part of *store.Store the hub uses (tests wrap it to inject failures).
+type eventStore interface {
+	ActiveRuns(ctx context.Context) ([]store.Run, error)
+	AppendEvents(ctx context.Context, sessionID, runID string, evs []store.NewEvent, upd store.RunUpdate) ([]store.Event, error)
+	EventsAfter(ctx context.Context, sessionID string, after int64, limit int) ([]store.Event, error)
+	LastEvent(ctx context.Context, sessionID, runID, kind string) (store.Event, error)
+	InsertRun(ctx context.Context, r store.Run) error
+	RunByClientMsgID(ctx context.Context, clientMsgID string) (store.Run, error)
+	SessionModelFor(ctx context.Context, sessionID string) (store.SessionModel, bool, error)
+}
+
 // Hub is safe for concurrent use.
 type Hub struct {
-	store  *store.Store
+	store  eventStore
 	hermes *hermes.Client
 	log    *slog.Logger
 	opts   Options
@@ -165,14 +176,15 @@ func runMsg(rs *runState) []byte {
 	return encode(protocol.Run{Type: "run", RunID: rs.id, SessionID: rs.sessionID, Status: rs.status})
 }
 
-// emit stores evs and the run update atomically, then fans out the events and any status change. In-memory state
-// follows the update even if the database write fails, so a terminal frame always frees the session.
-func (h *Hub) emit(rs *runState, evs []store.NewEvent, upd store.RunUpdate) {
+// emit stores evs and the run update atomically, then fans out the events and any status change. If the write
+// fails nothing is sent and nothing changes: the caller decides how to recover (see handleFrame).
+func (h *Hub) emit(rs *runState, evs []store.NewEvent, upd store.RunUpdate) error {
 	s := h.lockSession(rs.sessionID)
 	defer h.unlockSession(s)
 	stored, err := h.store.AppendEvents(context.Background(), rs.sessionID, rs.id, evs, upd)
 	if err != nil {
 		h.log.Error("storing events failed", "session_id", rs.sessionID, "run_id", rs.id, "events", len(evs), "err", err.Error())
+		return err
 	}
 	for _, e := range stored {
 		msg := eventMsg(e)
@@ -181,10 +193,17 @@ func (h *Hub) emit(rs *runState, evs []store.NewEvent, upd store.RunUpdate) {
 		}
 	}
 	rs.events += len(stored)
-	if upd.Status == "" || upd.Status == rs.status {
+	h.setStatus(s, rs, upd.Status)
+	return nil
+}
+
+// setStatus moves rs to status (if it changes) and tells the subscribers; a terminal status frees the session.
+// Session lock held.
+func (h *Hub) setStatus(s *session, rs *runState, status string) {
+	if status == "" || status == rs.status {
 		return
 	}
-	rs.status = upd.Status
+	rs.status = status
 	msg := runMsg(rs)
 	for sub := range s.subs {
 		sub.Deliver(msg)
@@ -291,14 +310,9 @@ func (h *Hub) ForgetSource(id string) {
 const SourceAPIServer = "api_server"
 
 // Prompt starts a run for clientMsgID, or acknowledges the run it already started. onAck runs before any of the
-// run's events are delivered.
+// run's events are delivered. Only the first of concurrent calls for one clientMsgID looks it up and starts the run;
+// checking the database first would let a resend miss both the row (not stored yet) and the inflight entry (gone).
 func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, onAck func(runID string, replayed bool)) error {
-	if r, err := h.store.RunByClientMsgID(ctx, clientMsgID); err == nil {
-		onAck(r.RunID, true)
-		return nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return protocol.Errorf(protocol.CodeInternal, "internal error")
-	}
 	h.mu.Lock()
 	if p := h.inflight[clientMsgID]; p != nil {
 		h.mu.Unlock()
@@ -317,7 +331,14 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID
 	h.inflight[clientMsgID] = p
 	h.mu.Unlock()
 
-	p.runID, p.err = h.startRun(ctx, deviceID, clientMsgID, sessionID, text, onAck)
+	if r, err := h.store.RunByClientMsgID(ctx, clientMsgID); err == nil {
+		p.runID = r.RunID
+		onAck(r.RunID, true)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		p.err = protocol.Errorf(protocol.CodeInternal, "internal error")
+	} else {
+		p.runID, p.err = h.startRun(ctx, deviceID, clientMsgID, sessionID, text, onAck)
+	}
 	h.mu.Lock()
 	delete(h.inflight, clientMsgID)
 	h.mu.Unlock()
@@ -431,7 +452,7 @@ func (h *Hub) Steer(ctx context.Context, sub Subscriber, runID, text string) err
 	if err := h.control(rs, "steer", h.hermes.Steer(context.WithoutCancel(ctx), runID, text)); err != nil {
 		return err
 	}
-	h.emit(rs, []store.NewEvent{{Kind: protocol.KindSteerQueued, Data: []byte("{}"), TS: time.Now().UnixMilli()}}, store.RunUpdate{HermesSeq: -1})
+	_ = h.emit(rs, []store.NewEvent{{Kind: protocol.KindSteerQueued, Data: []byte("{}"), TS: time.Now().UnixMilli()}}, store.RunUpdate{HermesSeq: -1})
 	return nil
 }
 
@@ -446,12 +467,7 @@ func (h *Hub) Approve(ctx context.Context, sub Subscriber, runID, requestID, cho
 	if err != nil {
 		return err
 	}
-	err = h.hermes.Approve(context.WithoutCancel(ctx), runID, requestID, choice)
-	if err == nil {
-		h.log.Info("approval answered", "session_id", rs.sessionID, "run_id", rs.id, "choice", choice)
-		return nil
-	}
-	return h.control(rs, "approval", err)
+	return h.control(rs, "approval", h.hermes.Approve(context.WithoutCancel(ctx), runID, requestID, choice))
 }
 
 // ActiveRun returns the id of a session's active run, if any.

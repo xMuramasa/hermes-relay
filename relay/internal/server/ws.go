@@ -22,7 +22,8 @@ type wsConn struct {
 	c    *websocket.Conn
 	dev  store.Device
 	send chan []byte
-	work chan struct{} // in-flight request slots
+	work chan struct{}  // in-flight request slots
+	jobs sync.WaitGroup // in-flight requests (async); the socket is finished only after them
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -105,6 +106,8 @@ func (s *Server) handleWS(rw http.ResponseWriter, r *http.Request) {
 		s.hub.Unsubscribe(w, sid)
 	}
 	wg.Wait()
+	// A prompt may be inside CreateRun: shutdown must not close the store before its run is stored.
+	w.jobs.Wait()
 	s.log.Info("websocket closed", "device", dev.Name, "code", int(w.code), "reason", w.reason,
 		"duration_ms", time.Since(start).Milliseconds())
 }
@@ -313,12 +316,12 @@ func (w *wsConn) async(ref string, fn func(context.Context) error) {
 		w.sendError(protocol.Errorf(protocol.CodeRateLimited, "too many requests in flight"), ref)
 		return
 	}
-	go func() {
+	w.jobs.Go(func() {
 		defer func() { <-w.work }()
 		if err := fn(w.ctx); err != nil {
 			w.sendError(asProtocol(err), ref)
 		}
-	}()
+	})
 }
 
 func asProtocol(err error) *protocol.Error {
