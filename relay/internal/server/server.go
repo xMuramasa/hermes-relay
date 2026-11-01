@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/xMuramasa/trismegistus/relay/internal/agents"
 	"github.com/xMuramasa/trismegistus/relay/internal/github"
 	"github.com/xMuramasa/trismegistus/relay/internal/hermes"
 	"github.com/xMuramasa/trismegistus/relay/internal/hub"
@@ -65,6 +66,7 @@ type Server struct {
 	hub       *hub.Hub
 	hermes    *hermes.Client
 	github    *github.Client // nil: the /api/github endpoints answer not_configured
+	agents    *agents.Client // nil: the /api/agents endpoints answer not_configured
 	log       *slog.Logger
 	validator *protocol.Validator
 
@@ -131,6 +133,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/github/repos/{owner}/{repo}/issues/{number}/comments", s.ghWrite(s.githubComment))
 	mux.HandleFunc("PATCH /api/github/repos/{owner}/{repo}/issues/{number}", s.ghWrite(s.githubSetState))
 	mux.HandleFunc("PUT /api/github/repos/{owner}/{repo}/issues/{number}/board", s.ghWrite(s.githubSetBoard))
+	// Background agents (agents.go, #22): every device reads, managers stop.
+	mux.HandleFunc("GET /api/agents", s.logged(s.authed(s.listAgents)))
+	mux.HandleFunc("GET /api/agents/{id}/transcript", s.logged(s.authed(s.agentTranscript)))
+	mux.HandleFunc("POST /api/agents/{id}/stop", manage(s.stopAgent))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

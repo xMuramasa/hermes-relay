@@ -1,0 +1,319 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// fakeStat is a /proc/<pid>/stat line with the given state and start time (field 22).
+func fakeStat(pid int, state string, start int64) string {
+	return fmt.Sprintf("%d (ba sh) (x)) %s%s %d%s\n", pid, state, strings.Repeat(" 0", 18), start, strings.Repeat(" 0", 10))
+}
+
+type env struct {
+	t    *testing.T
+	h    *Helper
+	srv  *httptest.Server
+	mu   sync.Mutex
+	unit []string
+}
+
+func newEnv(t *testing.T, proc string) *env {
+	dir := t.TempDir()
+	runs := filepath.Join(dir, "wt")
+	if proc == "" {
+		proc = filepath.Join(dir, "proc")
+	}
+	for _, d := range []string{runs, proc} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := &env{t: t}
+	e.h = &Helper{Processes: filepath.Join(dir, "processes.json"), Runs: runs, Proc: proc, Home: dir,
+		Grace: 300 * time.Millisecond, Now: time.Now, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StopUnit: func(u string) error { e.mu.Lock(); e.unit = append(e.unit, u); e.mu.Unlock(); return nil }}
+	e.srv = httptest.NewServer(e.h.Handler())
+	t.Cleanup(e.srv.Close)
+	return e
+}
+
+func (e *env) write(path, s string) {
+	e.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *env) processes(v any) {
+	b, _ := json.Marshal(v)
+	e.write(e.h.Processes, string(b))
+}
+
+func (e *env) do(method, path string) (int, string) {
+	e.t.Helper()
+	req, _ := http.NewRequest(method, e.srv.URL+path, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func (e *env) list() map[string]Agent {
+	e.t.Helper()
+	st, b := e.do("GET", "/agents")
+	var out struct{ Agents []Agent }
+	if err := json.Unmarshal([]byte(b), &out); st != 200 || err != nil {
+		e.t.Fatalf("list: %d %s", st, b)
+	}
+	m := map[string]Agent{}
+	for _, a := range out.Agents {
+		m[a.ID] = a
+	}
+	return m
+}
+
+const stream = `{"type":"system","subtype":"hook_started"}
+{"type":"system","subtype":"init","cwd":"/home/u/Projects/repo-wt/issue-9","session_id":"x"}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Reading the spec."},{"type":"tool_use","name":"Bash","input":{"command":"go -C relay test\n  ./...","description":"run tests"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"` + "%s" + `"}],"is_error":true}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"a"}]}}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":7,"duration_ms":125000,"result":"All done."}
+`
+
+func TestListAndTranscript(t *testing.T) {
+	e := newEnv(t, "")
+	now := time.Now()
+	// A live delegate run (string numbers, as Hermes has also written them), a plain process, a stale entry whose pid
+	// now names another process, and a junk id.
+	e.write(filepath.Join(e.h.Proc, "4001", "stat"), fakeStat(4001, "S", 777))
+	e.write(filepath.Join(e.h.Proc, "4002", "stat"), fakeStat(4002, "S", 888))
+	e.write(filepath.Join(e.h.Proc, "4003", "stat"), fakeStat(4003, "S", 1))
+	e.processes([]map[string]any{
+		{"session_id": "proc_aaa", "command": "bash ~/wt/live-1-launch.sh", "pid": "4001", "host_start_time": "777",
+			"started_at": "1793560419.53", "cwd": "/home/u/Projects/x", "systemd_unit": "hermes-worker-proc_aaa.scope",
+			"session_key": "agent:main:telegram:dm:123456789", "watcher_chat_id": "123456789", "parent_session_id": "sess_1"},
+		{"session_id": "proc_bbb", "command": "python3 -m http.server\n 8000", "pid": 4002, "host_start_time": 888,
+			"started_at": 1793560000.5},
+		{"session_id": "proc_ccc", "command": "sleep 99", "pid": 4003, "host_start_time": 999, "started_at": 1000},
+		{"session_id": "../etc", "command": "x", "pid": 4002},
+	})
+	e.write(filepath.Join(e.h.Runs, "live-1.stream.jsonl"), `{"type":"system","subtype":"init","cwd":"/elsewhere"}`+"\n")
+	e.write(filepath.Join(e.h.Runs, "live-1-progress.md"), "10:00 spike done\n10:05 helper: 3 tests pass\n")
+	long := strings.Repeat("é", 500)
+	e.write(filepath.Join(e.h.Runs, "done-2.stream.jsonl"), fmt.Sprintf(stream, long)+`{"type":"assistant","message":{"content":[{"type":"text","text":"half a li`)
+	e.write(filepath.Join(e.h.Runs, "old-3.stream.jsonl"), stream)
+	old := now.Add(-25 * time.Hour)
+	if err := os.Chtimes(filepath.Join(e.h.Runs, "old-3.stream.jsonl"), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	_, raw := e.do("GET", "/agents")
+	for _, s := range []string{"123456789", "telegram", "watcher", "session_key"} {
+		if strings.Contains(raw, s) {
+			t.Fatalf("list leaks %q: %s", s, raw)
+		}
+	}
+	got := e.list()
+	if len(got) != 4 {
+		t.Fatalf("want 4 agents: %s", raw)
+	}
+	live := got["run_live-1"]
+	if live.Kind != "delegate" || !live.Alive || live.Title != "live-1" || live.Cwd != "/home/u/Projects/x" ||
+		live.StartedAt != 1793560419 || live.SessionID != "sess_1" || !live.Transcript || live.Progress != "10:05 helper: 3 tests pass" ||
+		live.Outcome != "" || live.EndedAt != 0 {
+		t.Fatalf("live run: %+v", live)
+	}
+	if p := got["proc_bbb"]; p.Kind != "process" || !p.Alive || p.Title != "python3 -m http.server 8000" || p.Transcript {
+		t.Fatalf("process: %+v", p)
+	}
+	if p := got["proc_ccc"]; p.Alive {
+		t.Fatalf("reused pid listed alive: %+v", p)
+	}
+	done := got["run_done-2"]
+	if done.Alive || done.Outcome != "success" || done.NumTurns != 7 || done.DurationMS != 125000 || done.Cwd != "/home/u/Projects/repo-wt/issue-9" ||
+		done.EndedAt == 0 || done.StartedAt != done.EndedAt-125 {
+		t.Fatalf("finished run: %+v", done)
+	}
+	if i := []int{strings.Index(raw, "run_live-1"), strings.Index(raw, "proc_bbb"), strings.Index(raw, "run_done-2"),
+		strings.Index(raw, "proc_ccc")}; !(i[0] < i[1] && i[1] < i[2] && i[2] < i[3]) {
+		t.Fatalf("want live first, newest first: %s", raw)
+	}
+
+	st, b := e.do("GET", "/agents/run_done-2/transcript")
+	var tr struct {
+		Steps []Step
+		Next  int
+		Alive bool
+	}
+	if err := json.Unmarshal([]byte(b), &tr); st != 200 || err != nil {
+		t.Fatalf("transcript: %d %s", st, b)
+	}
+	var lines []string
+	for _, s := range tr.Steps {
+		lines = append(lines, fmt.Sprintf("%d %s %v %s", s.Line, s.Kind, s.Error, s.Text))
+	}
+	want := []string{
+		"3 text false Reading the spec.",
+		"3 tool false Bash: go -C relay test ./...",
+		"4 tool_result true " + strings.Repeat("é", 400) + "…",
+		`5 tool false TodoWrite: {"todos":[{"content":"a"}]}`,
+		"6 result false All done.",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") || tr.Next != 6 || tr.Alive {
+		t.Fatalf("steps:\n%s\nnext %d", strings.Join(lines, "\n"), tr.Next)
+	}
+	if st, b := e.do("GET", "/agents/run_done-2/transcript?after=6"); st != 200 || b != `{"alive":false,"next":6,"steps":[]}` {
+		t.Fatalf("nothing new: %d %s", st, b)
+	}
+	if st, b := e.do("GET", "/agents/run_done-2/transcript?after=4"); st != 200 || !strings.Contains(b, `"line":5`) || strings.Contains(b, `"line":4`) {
+		t.Fatalf("after 4: %d %s", st, b)
+	}
+	if st, b := e.do("GET", "/agents/proc_bbb/transcript"); st != 200 || b != `{"alive":true,"next":0,"steps":[]}` {
+		t.Fatalf("process transcript: %d %s", st, b)
+	}
+	for _, c := range []struct {
+		path string
+		st   int
+	}{
+		{"/agents/run_old-3/transcript", 404},
+		{"/agents/run_nope/transcript", 404},
+		{"/agents/run_..%2Fx/transcript", 404},
+		{"/agents/run_done-2/transcript?after=-1", 400},
+		{"/agents/run_done-2/transcript?after=x", 400},
+	} {
+		if st, b := e.do("GET", c.path); st != c.st {
+			t.Errorf("%s: %d %s", c.path, st, b)
+		}
+	}
+
+	// Stop: only live, listed processes; with a scope, through systemctl (injected here).
+	if st, _ := e.do("POST", "/agents/proc_ccc/stop"); st != 404 {
+		t.Fatalf("stopping a reused pid: %d", st)
+	}
+	if st, _ := e.do("POST", "/agents/run_done-2/stop"); st != 404 {
+		t.Fatalf("stopping a finished run: %d", st)
+	}
+	if st, b := e.do("POST", "/agents/run_live-1/stop"); st != 202 || b != `{"stopping":true}` {
+		t.Fatalf("stop: %d %s", st, b)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		e.mu.Lock()
+		u := strings.Join(e.unit, ",")
+		e.mu.Unlock()
+		if u == "hermes-worker-proc_aaa.scope" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("systemctl stop: %q", u)
+		}
+	}
+}
+
+// child starts a shell script in its own process group, waits for its first output line (it is set up) and lists
+// it in processes.json as Hermes would.
+func (e *env) child(id, script string) (pid int, exited chan struct{}) {
+	e.t.Helper()
+	cmd := exec.Command("sh", "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := bufio.NewReader(out).ReadString('\n'); err != nil {
+		e.t.Fatal(err)
+	}
+	args := []string{"sh", "-c", script}
+	exited = make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	e.t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-exited })
+	var start int64
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var ok bool
+		if start, ok = e.h.startTime(int64(cmd.Process.Pid)); ok || time.Now().After(deadline) {
+			break
+		}
+	}
+	e.processes([]map[string]any{{"session_id": id, "command": strings.Join(args, " "), "pid": cmd.Process.Pid,
+		"host_start_time": start, "started_at": time.Now().Unix()}})
+	return cmd.Process.Pid, exited
+}
+
+func waitExit(t *testing.T, exited chan struct{}, within time.Duration) {
+	t.Helper()
+	select {
+	case <-exited:
+	case <-time.After(within):
+		t.Fatal("process still running")
+	}
+}
+
+func TestStopSignals(t *testing.T) {
+	e := newEnv(t, "/proc")
+	_, exited := e.child("proc_sleep", "echo ready; sleep 60")
+	if a := e.list()["proc_sleep"]; !a.Alive {
+		t.Fatalf("child not alive: %+v", a)
+	}
+	if st, b := e.do("POST", "/agents/proc_sleep/stop"); st != 202 {
+		t.Fatalf("stop: %d %s", st, b)
+	}
+	waitExit(t, exited, 2*time.Second)
+
+	// A process that ignores SIGTERM gets SIGKILL after the grace period.
+	_, exited = e.child("proc_stubborn", `trap "" TERM; echo ready; sleep 60; true`)
+	started := time.Now()
+	if st, b := e.do("POST", "/agents/proc_stubborn/stop"); st != 202 {
+		t.Fatalf("stop: %d %s", st, b)
+	}
+	waitExit(t, exited, 3*time.Second)
+	if d := time.Since(started); d < e.h.Grace {
+		t.Fatalf("killed after %v, before the grace period", d)
+	}
+	if len(e.unit) != 0 {
+		t.Fatalf("systemctl used without a unit: %v", e.unit)
+	}
+}
+
+func TestListenSocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents", "agents.sock")
+	ln, err := listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o666 {
+		t.Fatalf("socket mode: %v %v", fi, err)
+	}
+	if di, _ := os.Stat(filepath.Dir(path)); di.Mode().Perm() != 0o755 {
+		t.Fatalf("dir mode: %v", di.Mode())
+	}
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if _, err := listen("relative.sock"); err == nil {
+		t.Fatal("relative path accepted")
+	}
+}

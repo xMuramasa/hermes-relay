@@ -1,0 +1,11 @@
+[Unit]
+Description=Trismegistus agents helper (lists, follows and stops Hermes background work for the relay)
+
+[Service]
+ExecStart=%h/.local/bin/trismegistus-agents
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
