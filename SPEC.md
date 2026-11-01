@@ -242,8 +242,9 @@ helper does the work and the relay passes its JSON on.
 
 - **Host helper** `trismegistus-agents` (`agents/` in this repo, its own Go module, standard library only): a
   systemd **user** service (`agents/trismegistus-agents.service`, install steps in `agents/README.md`) serving HTTP
-  on a Unix socket, `$XDG_RUNTIME_DIR/trismegistus-agents/agents.sock` by default (`-socket`; directory 0755, socket
-  0666 so the container's uid 65532 can connect). The socket's directory is bind-mounted into the relay container and
+  on a Unix socket: the unit uses `~/.local/state/trismegistus-agents/agents.sock` (`-socket`; the built-in default
+  is under `$XDG_RUNTIME_DIR`, which is emptied at boot and so a bad bind-mount source; directory 0755, socket 0666
+  so the container's uid 65532 can connect; the home directory is 0750). The socket's directory is bind-mounted into the relay container and
   `AGENTS_SOCKET` (config, optional, absolute path) points at it; unset, or the helper not running, the endpoints
   answer `503 {"error": {"code": "not_configured", ...}}`.
 - Sources (checked 2026-11-01 in `tools/process_registry.py` and `~/.hermes/processes.json`): Hermes' process list,

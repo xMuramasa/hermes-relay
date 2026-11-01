@@ -2,7 +2,9 @@
 Description=Trismegistus agents helper (lists, follows and stops Hermes background work for the relay)
 
 [Service]
-ExecStart=%h/.local/bin/trismegistus-agents
+# The socket lives in a directory that survives reboots: the relay container bind-mounts it, and a mount source
+# under /run/user (emptied at boot) would be created by Docker as root if the relay started first.
+ExecStart=%h/.local/bin/trismegistus-agents -socket %h/.local/state/trismegistus-agents/agents.sock
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

@@ -28,7 +28,7 @@ cp trismegistus-agents.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now trismegistus-agents
 systemctl --user status trismegistus-agents      # "serving" with the socket path
-ls -l /run/user/$(id -u)/trismegistus-agents/    # agents.sock, srw-rw-rw-
+ls -l ~/.local/state/trismegistus-agents/        # agents.sock, srw-rw-rw-
 ```
 
 User services run only while you are logged in unless lingering is on (`loginctl show-user $USER -p Linger`; turn
@@ -38,16 +38,20 @@ Then the relay container needs the socket directory mounted and `AGENTS_SOCKET` 
 
 ```yaml
 volumes:
-  - /run/user/1000/trismegistus-agents:/run/agents:ro
+  - /home/muramasa/.local/state/trismegistus-agents:/run/agents:ro
 environment:
   AGENTS_SOCKET: /run/agents/agents.sock
 ```
 
+The unit puts the socket in `~/.local/state/trismegistus-agents/` rather than the `$XDG_RUNTIME_DIR` default:
+`/run/user/<uid>` is emptied at boot, and if the relay container started before the helper, Docker would create the
+missing mount source as root and the helper could no longer make its socket there. The state directory persists
+(create it once with `mkdir -p`); the helper replaces a stale socket when it starts.
+
 A read-only bind mount still lets the relay connect to the socket. After an update: rebuild, then
 `systemctl --user restart trismegistus-agents`. Logs: `journalctl --user -u trismegistus-agents`.
 
-Anyone who can reach the socket can stop the listed processes; it lives under `/run/user/<uid>` (mode 0700), so
-only you and the relay container (through the mount) can.
+Anyone who can reach the socket can stop the listed processes; it lives under your home directory (mode 0750), so only you and the relay container (through the mount) can.
 
 ## Tests
 
