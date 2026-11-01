@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/xMuramasa/trismegistus/relay/internal/agents"
 	"github.com/xMuramasa/trismegistus/relay/internal/config"
 	"github.com/xMuramasa/trismegistus/relay/internal/github"
 	"github.com/xMuramasa/trismegistus/relay/internal/hermes"
@@ -51,6 +52,7 @@ Environment:
   GITHUB_TOKEN     GitHub token for the /api/github endpoints (optional; scopes repo + project)
   GITHUB_OWNER     owner whose repos the relay may reach (required with GITHUB_TOKEN)
   GITHUB_PROJECT   the board's ProjectV2 node id, PVT_... (required with GITHUB_TOKEN)
+  AGENTS_SOCKET    Unix socket of the host helper trismegistus-agents, for /api/agents (optional)
 `
 
 func main() {
@@ -130,6 +132,9 @@ func serve(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) int
 	}
 	if cfg.GitHubToken != "" {
 		srv.SetGitHub(github.New(config.DefaultGitHubAPIURL, cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubProject))
+	}
+	if cfg.AgentsSocket != "" {
+		srv.SetAgents(agents.New(cfg.AgentsSocket))
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {

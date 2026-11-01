@@ -28,12 +28,14 @@ func TestValues(t *testing.T) {
 	c, err := Load(env(map[string]string{
 		"HERMES_URL": "http://127.0.0.1:9999", "HERMES_API_KEY": " fake ", "RELAY_ADDR": "0.0.0.0:1",
 		"PUBLIC_URL": "https://relay.example/", "DATA_DIR": "/tmp/x", "TRUSTED_PROXIES": "10.0.0.1, 192.168.0.0/16",
+		"AGENTS_SOCKET": "/run/agents/agents.sock",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.HermesAPIKey != "fake" || c.PublicURL != "https://relay.example" || len(c.TrustedProxies) != 2 ||
-		c.TrustedProxies[0].String() != "10.0.0.1/32" || c.RequireServe() != nil || c.RequirePair() != nil {
+		c.TrustedProxies[0].String() != "10.0.0.1/32" || c.RequireServe() != nil || c.RequirePair() != nil ||
+		c.AgentsSocket != "/run/agents/agents.sock" {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -41,12 +43,13 @@ func TestValues(t *testing.T) {
 func TestBadValues(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"HERMES_URL": "ftp://x", "RELAY_ADDR": "nope", "PUBLIC_URL": "relay", "TRUSTED_PROXIES": "300.1.1.1/8", "LOG_LEVEL": "loud",
+		"AGENTS_SOCKET":  "agents.sock",
 		"HERMES_API_KEY": "super-secret-key",
 	}))
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"HERMES_URL", "RELAY_ADDR", "PUBLIC_URL", "TRUSTED_PROXIES", "LOG_LEVEL"} {
+	for _, want := range []string{"HERMES_URL", "RELAY_ADDR", "PUBLIC_URL", "TRUSTED_PROXIES", "LOG_LEVEL", "AGENTS_SOCKET"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s: %v", want, err)
 		}

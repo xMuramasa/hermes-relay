@@ -234,6 +234,56 @@ is hard-coded. Reads are cached 30 s (errors are not cached); any write drops th
 - Logs carry the route, repo name, issue number, device and GitHub's HTTP status; never issue or comment text or the
   token. Starting a Hermes conversation from an issue is the app's job (create a session, send a prompt).
 
+### Background agents (REST, for the Mac app; added 2026-11-01)
+
+Watch background work on optiplex: Hermes' background processes and the Claude Code delegate runs among them, with
+progress, a transcript and a stop button. The relay's container is read-only and can't see host PIDs, so a host
+helper does the work and the relay passes its JSON on.
+
+- **Host helper** `trismegistus-agents` (`agents/` in this repo, its own Go module, standard library only): a
+  systemd **user** service (`agents/trismegistus-agents.service`, install steps in `agents/README.md`) serving HTTP
+  on a Unix socket, `$XDG_RUNTIME_DIR/trismegistus-agents/agents.sock` by default (`-socket`; directory 0755, socket
+  0666 so the container's uid 65532 can connect). The socket's directory is bind-mounted into the relay container and
+  `AGENTS_SOCKET` (config, optional, absolute path) points at it; unset, or the helper not running, the endpoints
+  answer `503 {"error": {"code": "not_configured", ...}}`.
+- Sources (checked 2026-11-01 in `tools/process_registry.py` and `~/.hermes/processes.json`): Hermes' process list,
+  a JSON list of its **running** background processes (`session_id` `proc_…`, `command`, `pid`, `host_start_time`
+  (`/proc/<pid>/stat` field 22, against pid reuse), `systemd_unit` (a user scope holding the process tree), `cwd`,
+  `started_at`, `parent_session_id`, …; numbers may be JSON numbers or strings). Claude Code delegate runs are the
+  entries whose command is `bash <runs dir>/<name>-launch.sh` (`-runs`, default `~/.hermes/cache/scratch/tmac/wt`);
+  next to the script are `<name>.stream.jsonl` (Claude Code `stream-json`) and `<name>-progress.md`. Finished runs
+  leave the process list but their files stay: those written in the last 24 hours are listed as finished.
+- Not covered: **Hermes subagents** (`delegate_task`) live only inside the gateway process
+  (`tools/delegate_tool_registry.py`) and its API server has no endpoint for them, so they can't be listed without
+  changing Hermes. Other background processes have **no transcript**: Hermes keeps their output in its own memory
+  (no log file on the host).
+- The helper reads only the process list, `/proc/<pid>/stat`, and the stream and progress files of the delegate runs
+  it lists; never environment variables (`/proc/<pid>/environ`), command lines from `/proc`, or other files. It never
+  answers `session_key`, task ids or `watcher_*` values.
+- Every device: `GET /api/agents` → `{"agents": [agent, ...]}`, running first, then newest first. An agent: `id`
+  (`proc_…` for a process, `run_<name>` for a delegate run, alive or finished), `kind` (`process` or `delegate`),
+  `title` (the run's name, or the command's first 80 characters on one line), `command`, `cwd` (a finished run's from
+  its init line), `started_at` (unix seconds; a finished run's is its end minus `duration_ms`), `ended_at` (finished
+  runs: when the transcript was last written), `alive` (the pid exists, isn't a zombie and its start time still
+  matches), `session_id` (the Hermes conversation that started it, when Hermes recorded one), `transcript` (bool),
+  and for delegate runs `progress` (the last line of the progress file, ≤ 300 characters), `outcome` (the result
+  line's `subtype`: `success`, `error_max_turns`, …; absent while running or when killed), `num_turns`,
+  `duration_ms`. Empty fields are left out.
+- Every device: `GET /api/agents/:id/transcript?after=N` → `{"steps": [{"line", "kind", "text", "error"?}],
+  "next", "alive"}`: readable steps from stream-json lines after line `N` (default 0; complete lines only, at most
+  200 steps per answer: ask again with `after=next`). Kinds: `text` (assistant text), `tool` ("Bash: go test ./..."
+  : the tool's name and a one-line summary of its main argument, ≤ 160 characters), `tool_result` (≤ 400 characters,
+  `error` when the tool failed), `result` (the final answer, ≤ 8000 characters). Thinking and system lines are
+  skipped. Processes without a transcript answer `{"steps": [], "next": N}`. `N` must be digits (else
+  `bad_request`); an unknown or expired id is `not_found`.
+- `manager` only (`forbidden` for viewers): `POST /api/agents/:id/stop` → 202 `{"stopping": true}`, only for a
+  listed, alive process whose start time still matches (else `not_found`). The helper runs `systemctl --user stop
+  <unit>` when Hermes made a scope (it takes the whole tree, the launch script's `claude` too), otherwise SIGTERM to
+  the process group, SIGKILL after 10 s. It answers at once; the list shows `alive: false` when it's done. Each stop
+  is logged with the id, device and outcome.
+- Ids are checked by the relay (`proc_` + up to 64 letters/digits, or `run_` + a name of letters, digits, `.`, `_`,
+  `-`) before the helper is asked; any other `:id` is `not_found`.
+
 ### WebSocket `/ws`
 
 Messages are JSON objects with a `type` field, defined in `protocol/schema.json`.
