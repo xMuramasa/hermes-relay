@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/xMuramasa/trismegistus/relay/internal/github"
 	"github.com/xMuramasa/trismegistus/relay/internal/hermes"
 	"github.com/xMuramasa/trismegistus/relay/internal/hub"
 	"github.com/xMuramasa/trismegistus/relay/internal/protocol"
@@ -63,6 +64,7 @@ type Server struct {
 	store     *store.Store
 	hub       *hub.Hub
 	hermes    *hermes.Client
+	github    *github.Client // nil: the /api/github endpoints answer not_configured
 	log       *slog.Logger
 	validator *protocol.Validator
 
@@ -121,6 +123,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/{id}/pause", manage(s.jobAction("pause")))
 	mux.HandleFunc("POST /api/jobs/{id}/resume", manage(s.jobAction("resume")))
 	mux.HandleFunc("POST /api/jobs/{id}/run", manage(s.jobAction("run")))
+	// GitHub (#21): reads for every device, writes for managers.
+	mux.HandleFunc("GET /api/github/board", s.logged(s.authed(s.gh(s.githubBoard))))
+	mux.HandleFunc("GET /api/github/repos", s.logged(s.authed(s.gh(s.githubRepos))))
+	mux.HandleFunc("GET /api/github/repos/{owner}/{repo}/issues", s.logged(s.authed(s.gh(s.githubIssues))))
+	mux.HandleFunc("GET /api/github/repos/{owner}/{repo}/issues/{number}", s.logged(s.authed(s.gh(s.githubIssue))))
+	mux.HandleFunc("POST /api/github/repos/{owner}/{repo}/issues/{number}/comments", s.ghWrite(s.githubComment))
+	mux.HandleFunc("PATCH /api/github/repos/{owner}/{repo}/issues/{number}", s.ghWrite(s.githubSetState))
+	mux.HandleFunc("PUT /api/github/repos/{owner}/{repo}/issues/{number}/board", s.ghWrite(s.githubSetBoard))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

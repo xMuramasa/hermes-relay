@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xMuramasa/trismegistus/relay/internal/config"
+	"github.com/xMuramasa/trismegistus/relay/internal/github"
 	"github.com/xMuramasa/trismegistus/relay/internal/hermes"
 	"github.com/xMuramasa/trismegistus/relay/internal/hub"
 	"github.com/xMuramasa/trismegistus/relay/internal/pairing"
@@ -47,6 +48,9 @@ Environment:
   DATA_DIR         directory for relay.db (default /data)
   TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is honored (default 127.0.0.1/32,172.16.0.0/12)
   LOG_LEVEL        debug, info, warn or error (default info)
+  GITHUB_TOKEN     GitHub token for the /api/github endpoints (optional; scopes repo + project)
+  GITHUB_OWNER     owner whose repos the relay may reach (required with GITHUB_TOKEN)
+  GITHUB_PROJECT   the board's ProjectV2 node id, PVT_... (required with GITHUB_TOKEN)
 `
 
 func main() {
@@ -123,6 +127,9 @@ func serve(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) int
 	if err != nil {
 		log.Error("server setup failed", "err", err.Error())
 		return 1
+	}
+	if cfg.GitHubToken != "" {
+		srv.SetGitHub(github.New(config.DefaultGitHubAPIURL, cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubProject))
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {

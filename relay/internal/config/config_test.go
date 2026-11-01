@@ -55,3 +55,39 @@ func TestBadValues(t *testing.T) {
 		t.Fatal("config error leaks the key")
 	}
 }
+
+func TestGitHub(t *testing.T) {
+	with := func(kv ...string) Config {
+		m := map[string]string{"HERMES_API_KEY": "k"}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		c, err := Load(env(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if c := with(); c.GitHubToken != "" || c.RequireServe() != nil {
+		t.Fatalf("no GitHub settings is fine (not_configured): %+v", c)
+	}
+	if c := with("GITHUB_OWNER", "xMuramasa", "GITHUB_PROJECT", "PVT_x"); c.RequireServe() != nil {
+		t.Fatal("owner and project without a token is fine (not_configured)")
+	}
+	c := with("GITHUB_TOKEN", " ghp_secret ", "GITHUB_OWNER", "xMuramasa", "GITHUB_PROJECT", "PVT_kwHOAbc")
+	if c.GitHubToken != "ghp_secret" || c.GitHubOwner != "xMuramasa" || c.GitHubProject != "PVT_kwHOAbc" || c.RequireServe() != nil {
+		t.Fatalf("%+v", c)
+	}
+	for _, kv := range [][]string{
+		{"GITHUB_TOKEN", "ghp_secret"},
+		{"GITHUB_TOKEN", "ghp_secret", "GITHUB_OWNER", "xMuramasa"},
+		{"GITHUB_TOKEN", "ghp_secret", "GITHUB_PROJECT", "PVT_x"},
+		{"GITHUB_TOKEN", "ghp_secret", "GITHUB_OWNER", "x/y", "GITHUB_PROJECT", "PVT_x"},
+		{"GITHUB_TOKEN", "ghp_secret", "GITHUB_OWNER", "xMuramasa", "GITHUB_PROJECT", "12"},
+	} {
+		err := with(kv...).RequireServe()
+		if err == nil || !strings.Contains(err.Error(), "GITHUB_OWNER") || strings.Contains(err.Error(), "ghp_secret") {
+			t.Fatalf("%v: %v", kv, err)
+		}
+	}
+}

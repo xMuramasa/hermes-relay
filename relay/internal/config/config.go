@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -20,6 +21,10 @@ type Config struct {
 	DataDir        string
 	TrustedProxies []netip.Prefix
 	LogLevel       string
+	// GitHub (optional): without a token the /api/github endpoints answer not_configured.
+	GitHubToken   string
+	GitHubOwner   string
+	GitHubProject string // the Work board's node id (PVT_...)
 }
 
 // DBPath is the SQLite file inside DataDir.
@@ -31,6 +36,7 @@ const (
 	DefaultAddr           = "127.0.0.1:8650"
 	DefaultDataDir        = "/data"
 	DefaultTrustedProxies = "127.0.0.1/32,172.16.0.0/12"
+	DefaultGitHubAPIURL   = "https://api.github.com" // GraphQL is DefaultGitHubAPIURL + "/graphql"
 )
 
 // Load reads the environment through getenv. Only the settings every subcommand needs are checked here; serve
@@ -49,6 +55,10 @@ func Load(getenv func(string) string) (Config, error) {
 		PublicURL:    strings.TrimRight(get("PUBLIC_URL", ""), "/"),
 		DataDir:      get("DATA_DIR", DefaultDataDir),
 		LogLevel:     strings.ToLower(get("LOG_LEVEL", "info")),
+
+		GitHubToken:   strings.TrimSpace(getenv("GITHUB_TOKEN")),
+		GitHubOwner:   get("GITHUB_OWNER", ""),
+		GitHubProject: get("GITHUB_PROJECT", ""),
 	}
 	var errs []error
 	if u, err := url.Parse(c.HermesURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -91,8 +101,13 @@ func (c Config) RequireServe() error {
 	if c.HermesAPIKey == "" {
 		return errors.New("HERMES_API_KEY is required")
 	}
+	if c.GitHubToken != "" && (!githubOwnerRe.MatchString(c.GitHubOwner) || !strings.HasPrefix(c.GitHubProject, "PVT_")) {
+		return errors.New("GITHUB_TOKEN needs GITHUB_OWNER (a user or org login) and GITHUB_PROJECT (the board's PVT_ node id)")
+	}
 	return nil
 }
+
+var githubOwnerRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
 
 // RequirePair checks what pair needs on top of Load.
 func (c Config) RequirePair() error {

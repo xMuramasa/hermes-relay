@@ -100,7 +100,10 @@ Limits:
   `127.0.0.1:8650`), `PUBLIC_URL` (put in the pairing QR), `DATA_DIR` (default `/data`), `TRUSTED_PROXIES` (default
   `127.0.0.1/32,172.16.0.0/12`: peers whose `X-Forwarded-For` is used for rate limits), `LOG_LEVEL` (default `info`). The key goes in
   `homelab/trismegistus/.env` (mode 600), copied from `~/.hermes/.env` by an install script without printing it.
-  Only that one variable: the rest of Hermes' `.env` never enters the container.
+  Only that one variable: the rest of Hermes' `.env` never enters the container. GitHub (optional, see GitHub
+  below): `GITHUB_TOKEN` (in the same `.env`, added by Martin), `GITHUB_OWNER` (`xMuramasa`), `GITHUB_PROJECT` (the
+  Work board's node id, `PVT_…`). No token: the GitHub endpoints answer `not_configured`; a token without a valid
+  owner or a `PVT_` project stops `serve` at start.
 
 ### Pairing and devices
 
@@ -196,6 +199,40 @@ Hermes' 12 lowercase hex characters; any other `:id` is `not_found` without aski
   list); unreachable → `hermes_unavailable`.
 - Logs: each write logs `job <create|update|delete|pause|resume|run>` with the job id, device and outcome (`ok` or
   the error code); never prompts, names or Hermes' messages.
+
+### GitHub (REST, for the Mac app; added 2026-11-01)
+
+The relay talks to GitHub so no GitHub token lives on a device. It uses GitHub's GraphQL API only
+(`https://api.github.com/graphql`, a config default) with fixed queries: requests fill in a repo name, an issue number,
+an option and comment text, never a query. Only `GITHUB_OWNER`'s repos and the `GITHUB_PROJECT` board are reachable.
+The board's `Status` and `Priority` single-select fields are found by name and their ids cached (10 minutes); nothing
+is hard-coded. Reads are cached 30 s (errors are not cached); any write drops the cache.
+
+- `GET /api/github/board` → `{"status_options": [...], "priority_options": [...], "items": [{"repo": "owner/name",
+  "number", "title", "state": "open"|"closed", "status", "priority", "labels": [...], "updated_at", "url"}]}`. Options
+  are names in board order; an unset status or priority is `""`. Only issues of the owner's repos (pull requests,
+  drafts and other owners' issues are left out); up to 1000 items.
+- `GET /api/github/repos` → `{"repos": ["owner/name", ...]}`: the owner's repos with issues on the board, sorted.
+- `GET /api/github/repos/{owner}/{repo}/issues?state=open|closed` (default `open`) → `{"repo", "state", "total",
+  "issues": [{"number", "title", "state", "labels", "comments", "updated_at", "url"}]}`: the 100 most recently
+  updated.
+- `GET /api/github/repos/{owner}/{repo}/issues/{number}` → `{"repo", "number", "title", "body", "state", "author",
+  "labels", "created_at", "updated_at", "url", "on_board", "status", "priority", "comments_total", "comments":
+  [{"author", "body", "created_at", "url"}]}` (the last 100 comments, oldest first). Issues not on the board can be
+  read (`on_board: false`).
+- Manager only (viewers get `forbidden`):
+  - `POST .../issues/{number}/comments {"body"}` (non-empty; request ≤ 16 KiB) → 201 `{"author", "body",
+    "created_at", "url"}`.
+  - `PATCH .../issues/{number} {"state": "open"|"closed"}` (reopen or close) → `{"state"}`.
+  - `PUT .../issues/{number}/board {"status"?, "priority"?}` (option names from `GET /api/github/board`, at least
+    one) → `{"status", "priority"}`. An issue not on the board is added to it first.
+- `{owner}` must be `GITHUB_OWNER` (case-insensitive), else `forbidden`; pull request numbers are `not_found`.
+- Errors are `{"error": {code, message, retry_at?}}`, codes REST-only: `not_configured` (503: no `GITHUB_TOKEN`, or
+  GitHub refused it), `rate_limited` (429, `retry_at` RFC 3339 and `Retry-After`, from GitHub's rate-limit headers),
+  `not_found` (404), `forbidden` (403: a viewer, another owner, or the token lacks a scope), `bad_request` (400:
+  unknown option, a board without that field), `github_error` (502: GitHub down or an unexpected answer).
+- Logs carry the route, repo name, issue number, device and GitHub's HTTP status; never issue or comment text or the
+  token. Starting a Hermes conversation from an issue is the app's job (create a session, send a prompt).
 
 ### WebSocket `/ws`
 
