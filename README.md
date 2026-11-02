@@ -1,20 +1,23 @@
 # Trismegistus
 
-An Android companion app for [Hermes Agent](https://hermes-agent.nousresearch.com) running on a home server, plus
-the small relay server the app talks to. See [SPEC.md](SPEC.md).
+The relay server and WebSocket protocol behind the companion apps for
+[Hermes Agent](https://hermes-agent.nousresearch.com) running on a home server: the native macOS app
+([trismegistus-mac](https://github.com/xMuramasa/trismegistus-mac)) and a native Android app (planned, its own repo).
+See [SPEC.md](SPEC.md).
 
 ```
-phone (Expo app) --WebSocket--> relay (Go) --HTTP/SSE--> Hermes API server (localhost only)
+apps (macOS, Android) --WebSocket--> relay (Go) --HTTP/SSE--> Hermes API server (localhost only)
 ```
 
-Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (protocol + relay) built, tested and deployed; phase 2a (app:
-pair, sessions, chat) built, not yet checked on the phone.
+Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (protocol + relay) built, tested and deployed, since extended
+for the Mac app. The Expo Android app (`apps/mobile`, phase 2a) was removed on 2026-11-02 for a native build; its
+code is at the tag `expo-archive`.
 
 ## Layout
 
 - `SPEC.md`: what it does and why.
 - `probe/`: phase 0 scripts and the recorded Hermes event streams used as test fixtures.
-- `protocol/`: the WebSocket protocol, shared by relay and app: `schema.json` (JSON Schema 2020-12),
+- `protocol/`: the WebSocket protocol, shared by the relay and the apps: `schema.json` (JSON Schema 2020-12),
   `examples/valid/` and `examples/invalid/`, and a short guide in `protocol/README.md`.
 - `relay/`: the Go relay (one module, `github.com/xMuramasa/trismegistus/relay`).
   - `cmd/trismegistus-relay`: the binary and its subcommands.
@@ -28,18 +31,6 @@ pair, sessions, chat) built, not yet checked on the phone.
   - `internal/pairing`: tokens, pairing codes, the QR code.
   - `internal/fakehermes`: the fake Hermes the tests run against (replays `probe/fixtures/`).
   - `Dockerfile`: build context `relay/`.
-- `apps/mobile`: the Expo app (SDK 58, Expo Go), see [apps/mobile/README.md](apps/mobile/README.md).
-  - `src/app`: screens (pair, sessions, chat); `src/lib`: protocol decoder, pairing, REST, socket, chat reducer;
-    `src/components`: UI; `test`: `bun test` (reads `protocol/` and `probe/fixtures/` by path).
-
-## App
-
-```sh
-cd apps/mobile
-bun install
-bun run check                                     # tsc + bun test
-REACT_NATIVE_PACKAGER_HOSTNAME=<host IP> bun run start   # then scan the QR in Expo Go
-```
 
 ## Protocol
 

@@ -1,26 +1,30 @@
 # Trismegistus: spec v1 (2026-10-23)
 
-Trismegistus is an Android companion app for Hermes, plus the relay server it talks to.
+Trismegistus is the relay server and WebSocket protocol behind Hermes' companion apps: the native macOS app
+(`xMuramasa/trismegistus-mac`) and a native Android app (planned, its own repo). Until 2026-11-02 this repo also held
+the Android app as an Expo project (`apps/mobile`); it was removed for a native build and is kept at the tag
+`expo-archive`.
 
 ## Goal
 
-An Android app for talking to Hermes on optiplex from the phone: replies, live tool progress, approvals for risky
+Apps for talking to Hermes on optiplex from the phone and the Mac: replies, live tool progress, approvals for risky
 commands, and past conversations. A small relay server keeps conversations alive across flaky mobile
-connections and keeps Hermes' API key off the phone.
+connections and keeps Hermes' API key off the devices.
 
 ## Decisions so far
 
-- Android only. Expo (React Native, TypeScript, Bun). Expo Go for day-to-day work; APKs from EAS Build (free plan)
-  or local builds on the Mac.
+- Android (decided 2026-11-02): a native app (Kotlin, Jetpack Compose) in its own repo, built in Docker on optiplex
+  and sideloaded, its usability mapped onto the Mac app's. It replaces the Expo app (`apps/mobile`, phase 2a, built
+  2026-10-24 and never checked on the phone), archived at the tag `expo-archive`. See Android app below.
 - Desktop (decided 2026-10-30): a native macOS menu bar companion in its own repo, `xMuramasa/trismegistus-mac`
-  (Swift, SwiftUI), speaking this protocol against the same relay. No web, Electron or Tauri build of the Expo app.
+  (Swift, SwiftUI), speaking this protocol against the same relay. No web, Electron or Tauri build.
   Linux is a Quickshell module in endfield-dotfiles later. The protocol stays owned here; that repo copies
   `protocol/` with a script and a staleness test.
 - Relay: Go + WebSocket (chosen 2026-10-23 over Bun: one static binary, ~10-20 MB RAM). Not WebTransport: no React
   Native client, and it needs HTTP/3 end to end.
-- The relay and the app share no code, so the WebSocket protocol is defined once in `protocol/schema.json` (JSON
-  Schema) with example messages in `protocol/examples/`. Go tests and the app's tests must both accept every valid
-  example and reject every invalid one.
+- The relay and its apps share no code, so the WebSocket protocol is defined once in `protocol/schema.json` (JSON
+  Schema) with example messages in `protocol/examples/`. The relay's tests and each app's tests must accept every
+  valid example and reject every invalid one (an app may leave length and pattern limits to the relay).
 - Hermes API server is on since 2026-10-23: `127.0.0.1:8642` on optiplex only, key `API_SERVER_KEY` in
   `~/.hermes/.env`. Never exposed directly.
 - The relay is reachable on the LAN and tailnet only, through Caddy: `https://hermes.lab.x-muramasa.dev`.
@@ -29,13 +33,13 @@ connections and keeps Hermes' API key off the phone.
 - Approvals stay in Hermes' smart mode: only commands the AI reviewer escalates reach the phone. The modal offers
   Once / This session / Deny; Hermes' `always` choice is hidden on purpose.
 - Logs: the relay's stdout shows in Dozzle; Hermes' own logs are already there (`homelab/hermes-logs`).
-- Private repo `xMuramasa/trismegistus` (`~/Projects/trismegistus` on optiplex, cloned to the Mac for Expo), direct
+- Private repo `xMuramasa/trismegistus` (`~/Projects/trismegistus` on optiplex), direct
   commits to `main`.
 
 ## Flow
 
 ```
-phone app --WSS--> Caddy (hermes.lab) --> relay 172.18.0.1:8650 --HTTP/SSE--> Hermes API 127.0.0.1:8642
+phone / Mac app --WSS--> Caddy (hermes.lab) --> relay 172.18.0.1:8650 --HTTP/SSE--> Hermes API 127.0.0.1:8642
 ```
 
 - The phone only talks to the relay. The relay holds the Hermes key.
@@ -111,7 +115,7 @@ Limits:
   `{"v":1,"url":PUBLIC_URL,"code":...}` (a one-time code `XXXX-XXXX-XXXX`, Crockford base32, valid 10 minutes, single
   use, stored hashed), plus the code and expiry as text. An existing name fails unless `--replace`, which revokes the
   old device.
-- The app scans it (camera works in Expo Go) and trades the code for a device token (`trs_` + base64url of 32 random
+- The app scans it (the Mac app takes the pasted code) and trades the code for a device token (`trs_` + base64url of 32 random
   bytes). The relay stores only its SHA-256, plus the name, creation time and last-seen time.
 - `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once (the server checks every 2 s,
   since the CLI runs as another process on the same database).
@@ -372,39 +376,26 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
   requests waiting on Hermes per socket. A socket that falls 8192 messages behind is closed; the app resubscribes.
 - WebSocket `Origin` is not checked: the app authenticates with a token in its first message, never a cookie.
 
-## App (`apps/mobile`)
+## Android app
 
-- Expo, TypeScript, Expo Router.
-- SDK: Expo SDK 58 (React Native 0.88). Expo Go for SDK 58 is on the Play Store since 2026-10-19, so the app
-  targets it directly. Only modules Expo Go bundles; no prebuild until phase 3.
-- Libraries (phase 2a): Expo Router, NativeWind 4.2 + tailwindcss 3.4 (NativeWind 5 is an rc), zustand,
-  react-native-marked for Markdown (pure JS, maintained), lucide-react-native icons, Cormorant Garamond / Inter /
-  JetBrains Mono from `@expo-google-fonts`. The app's protocol decoder is hand-written (ajv generates code with
-  `new Function`, which Hermes doesn't run); its tests check it against `protocol/examples/`, and the builders
-  against the schema with ajv.
-- Look: expressive, not stock. NativeWind (Tailwind for React Native) with shadcn-style components
-  (react-native-reusables), light and dark themes, its own type and accent.
-- Screens:
-  1. **Pair:** scan the QR; the relay URL and token go in `expo-secure-store`.
-  2. **Sessions:** list with title, last message and time; new chat; rename and delete.
-  3. **Chat:** Markdown replies (shown when the turn finishes, with a working indicator meanwhile), code blocks with
-     copy, collapsible tool rows ("terminal · 1.3 s"),
-     subagent cards, Stop, steer while running, retry.
-  4. **Approval modal:** a pop-up with the command preview and Once / This session / Deny.
-  5. **Settings:** relay URL, device name, unpair, theme, connection status.
-- One WebSocket. Reconnects with backoff on drops and when the app returns to the foreground, then resubscribes from
-  the last `seq`. Sessions and recent messages are cached on the phone for offline reading.
-- Tests: `bun test` for the protocol (against `protocol/examples/`) and the event reducer; a few component tests with
-  `@testing-library/react-native`; typecheck and `expo-doctor`.
+- A native app in its own repo (decided 2026-11-02), replacing the Expo app (`apps/mobile`, removed the same day; its
+  code is at the tag `expo-archive`). Usability follows trismegistus-mac: its sections (Chat, GitHub, News, Agents,
+  Jobs, Commands), the chat kind tabs, the command transcript, images in the composer, approvals with Once / Session
+  / Deny in the app and in the notification, and the Endfield look from its design tokens.
+- Carried over from the Expo backlog as requirements (those issues are closed as superseded): a ping/pong check so a
+  dead socket never shows Connected (#6); resubscribe from the last `seq` and resend what is pending after a drop
+  (#8); the duplicate filter keeps new events after `replay_gap` (#10); late history never shows an answer twice
+  (#11); Stop, steer, reconnect with backoff, settings and an offline cache (#14); approvals and notifications (#15);
+  an icon and splash (#17). trismegistus-mac's TrismegistusKit already implements and tests the #6-#11 rules.
+- Open before the build: Penpot phone frames first or straight to code; whether the phone stays a `viewer` or becomes
+  a `manager`; notifications while the app is closed (a foreground service holding the socket, or self-hosted push
+  through ntfy / UnifiedPush, which needs a relay change); the first version's scope.
 
 ## Dev setups
 
-- **Phone + Mac + optiplex relay:** the Expo dev server runs on the Mac; the app connects to
-  `https://hermes.lab.x-muramasa.dev` over the tailnet.
+- **Apps against the homelab relay:** `https://hermes.lab.x-muramasa.dev` over the tailnet.
 - **Relay on the Mac:** `cd relay && go run ./cmd/trismegistus-relay` with `HERMES_URL` pointing at an SSH tunnel
   (`ssh -N -L 8642:127.0.0.1:8642 optiplex`) and a local `DATA_DIR`. The app's relay URL is a setting, so it can point at either.
-- **APKs:** EAS Build free plan (a limited number of low-priority builds a month; check the account's billing page)
-  or local builds on the Mac.
 
 ## Deploy (homelab)
 
@@ -419,9 +410,8 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 - The Hermes key lives only in the relay's environment; phones get revocable tokens.
 - LAN and tailnet only (no public DNS), TLS from Caddy.
 - A paired, unlocked phone can approve commands that run on optiplex. No fingerprint check for now (one user); the
-  approval modal is the only gate. `expo-local-authentication` can be added later.
-- Push notifications (phase 3) go through Expo's push service and Firebase, so they carry no content: just
-  "Reply ready" or "Approval needed".
+  approval prompt is the only gate. A biometric check can be added later.
+- Push notifications, if the Android app gets them, carry no content: just "Reply ready" or "Approval needed".
 
 ## Phases
 
@@ -440,6 +430,10 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
    cron jobs (needs Hermes' jobs API, off now), model picker, voice.
 
 Each phase is done when its tests pass, it's committed and pushed, and (from phase 2) it's checked on the phone.
+
+Phases 2 and 3 were the Expo app: 2a was built (5e2d2c8) and never checked on the phone, 2b and 3 never started. On
+2026-11-02 they were superseded by the native Android app, which gets its own phases in its repo. Since then the
+relay has gained the cron, news, model and conversation-management endpoints from phase 4 for the Mac app.
 
 ## Answered (2026-10-23)
 
