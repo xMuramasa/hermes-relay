@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -29,12 +30,14 @@ func main() {
 	sock := flag.String("socket", filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "trismegistus-agents", "agents.sock"),
 		"Unix socket to serve on (its directory is made 0755, the socket 0666)")
 	procs := flag.String("processes", filepath.Join(home, ".hermes", "processes.json"), "Hermes' process list")
-	runs := flag.String("runs", filepath.Join(home, ".hermes", "cache", "scratch", "tmac", "wt"),
-		"directory of Claude Code delegate runs")
+	runs := flag.String("runs", filepath.Join(home, ".local", "state", "hermes-runs")+","+
+		filepath.Join(home, ".hermes", "cache", "scratch", "tmac", "wt"),
+		"comma-separated directories of Claude Code delegate runs (the first wins; the second is the old scratch folder)")
 	flag.Parse()
 
-	h := &Helper{Processes: *procs, Runs: *runs, Proc: "/proc", Home: home, Grace: 10 * time.Second, Now: time.Now, Log: log,
-		StopUnit: func(unit string) error { return exec.Command("systemctl", "--user", "stop", unit).Run() }}
+	h := &Helper{Processes: *procs, Runs: strings.Split(*runs, ","), Proc: "/proc", Home: home, Grace: 10 * time.Second, Now: time.Now, Log: log,
+		StopUnit:    func(unit string) error { return exec.Command("systemctl", "--user", "stop", unit).Run() },
+		ActiveUnits: activeUnits}
 	ln, err := listen(*sock)
 	if err != nil {
 		log.Error("listen failed", "socket", *sock, "err", err.Error())
@@ -80,4 +83,24 @@ func listen(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return ln, nil
+}
+
+// activeUnits lists the active dispatch-*.service user units; none when systemctl fails.
+func activeUnits() map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "systemctl", "--user", "list-units", "--plain", "--no-legend", "--no-pager", "--full",
+		"dispatch-*.service").Output()
+	return parseActiveUnits(string(out))
+}
+
+// parseActiveUnits reads `systemctl list-units --plain --no-legend` lines: unit, load, active, sub, description.
+func parseActiveUnits(out string) map[string]bool {
+	m := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) >= 3 && (f[2] == "active" || f[2] == "activating") {
+			m[f[0]] = true
+		}
+	}
+	return m
 }

@@ -48,7 +48,7 @@ func (f *fakeAgents) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.Method + " " + r.URL.Path {
 	case "GET /agents":
 		if body == "" {
-			body = `{"agents":[{"id":"run_issue-9","kind":"delegate","title":"issue-9","alive":true,"transcript":true}]}`
+			body = `{"agents":[{"id":"run_issue-9","kind":"delegate","title":"issue-9","alive":true,"transcript":true,"repo":"xMuramasa/trismegistus","issue":9,"issue_title":"T","model":"sonnet"}]}`
 		}
 		_, _ = w.Write([]byte(body))
 	case "GET /agents/run_issue-9/transcript":
@@ -99,7 +99,8 @@ func TestAgents(t *testing.T) {
 	phone := r.pair("pixel-8")
 	mac := r.pairAs("mac", store.RoleManager)
 
-	if st, b := r.do("GET", "/api/agents", phone, nil); st != 200 || !strings.Contains(string(b), `"id":"run_issue-9"`) {
+	if st, b := r.do("GET", "/api/agents", phone, nil); st != 200 || !strings.Contains(string(b), `"id":"run_issue-9"`) ||
+		!strings.Contains(string(b), `"repo":"xMuramasa/trismegistus","issue":9,"issue_title":"T","model":"sonnet"`) { // passed through as is
 		t.Fatalf("list: %d %s", st, b)
 	}
 	if st, b := r.do("GET", "/api/agents/run_issue-9/transcript?after=12&x=1", phone, nil); st != 200 ||

@@ -284,9 +284,11 @@ helper does the work and the relay passes its JSON on.
   a JSON list of its **running** background processes (`session_id` `proc_…`, `command`, `pid`, `host_start_time`
   (`/proc/<pid>/stat` field 22, against pid reuse), `systemd_unit` (a user scope holding the process tree), `cwd`,
   `started_at`, `parent_session_id`, …; numbers may be JSON numbers or strings). Claude Code delegate runs are the
-  entries whose command is `bash <runs dir>/<name>-launch.sh` (`-runs`, default `~/.hermes/cache/scratch/tmac/wt`);
+  entries whose command is `bash <runs dir>/<name>-launch.sh` (`-runs`, comma-separated, default `~/.local/state/hermes-runs,~/.hermes/cache/scratch/tmac/wt`);
   next to the script are `<name>.stream.jsonl` (Claude Code `stream-json`) and `<name>-progress.md`. Finished runs
-  leave the process list but their files stay: those written in the last 24 hours are listed as finished.
+  leave the process list but their files stay: those written in the last 7 days are listed as finished. Runs started
+  by `dispatch` (a transient `dispatch-<name>.service` user unit, not in the process list) add `<name>.run.json`; it
+  gives the agent `repo`, `issue`, `issue_title` and `model`, and the run is alive while its unit is active.
 - Not covered: **Hermes subagents** (`delegate_task`) live only inside the gateway process
   (`tools/delegate_tool_registry.py`) and its API server has no endpoint for them, so they can't be listed without
   changing Hermes. Other background processes have **no transcript**: Hermes keeps their output in its own memory
