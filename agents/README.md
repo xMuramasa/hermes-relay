@@ -5,9 +5,17 @@ read-only container without the host's PIDs, so this user service does the host 
 processes and Claude Code delegate runs, turns a run's `stream-json` transcript into readable steps, and stops a
 process it lists. Go standard library only.
 
-It reads only `~/.hermes/processes.json`, `/proc/<pid>/stat`, the `<name>.stream.jsonl` and `<name>-progress.md`
-files of delegate runs in the runs directory, and the images `/media` is asked for (below). Never environment
+It reads only `~/.hermes/processes.json`, `/proc/<pid>/stat`, the `<name>.stream.jsonl`, `<name>-progress.md` and
+`<name>.run.json` files of delegate runs in the runs directories, the active `dispatch-*.service` units
+(`systemctl --user list-units`, once per listing), and the images `/media` is asked for (below). Never environment
 variables, never other files.
+
+Runs started by `dispatch` (hermes-dispatch) are not in Hermes' process list: each is a transient user unit
+`dispatch-<name>.service`, and `<name>.run.json` beside its files names its `repo`, `issue`, `title` (listed as
+`issue_title`), `model` and `started_at`. Such a run is alive while its unit is active, and Stop is
+`systemctl --user stop` on that unit. An earlier attempt (`<name>-attemptK.*`) is a finished run with its own id.
+Finished runs are listed for 7 days (dispatch keeps their files 30 days). A missing or malformed `run.json` only
+means the run has no `repo`/`issue`.
 
 HTTP over a Unix socket, `$XDG_RUNTIME_DIR/trismegistus-agents/agents.sock` by default (directory 0755, socket 0666,
 so the relay container's user can connect):
@@ -21,8 +29,9 @@ so the relay container's user can connect):
   `~/.hermes/cache/`; a regular file with extension png, jpg, jpeg, gif or webp whose first bytes match it; at most
   10 MiB. 200 with `Content-Type` and `Cache-Control: private, max-age=3600`; anything else is 404 `not_found`.
 
-Flags: `-socket`, `-processes` (default `~/.hermes/processes.json`), `-runs` (default
-`~/.hermes/cache/scratch/tmac/wt`).
+Flags: `-socket`, `-processes` (default `~/.hermes/processes.json`), `-runs` (comma-separated, default
+`~/.local/state/hermes-runs,~/.hermes/cache/scratch/tmac/wt`: the old scratch folder is read as a second directory
+until it is empty; a run's file comes from the first directory that has it).
 
 ## Install (optiplex, as your user)
 

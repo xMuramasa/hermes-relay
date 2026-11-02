@@ -20,31 +20,34 @@ import (
 )
 
 const (
-	finishedFor  = 24 * time.Hour // finished delegate runs are listed this long (Hermes prunes their files after ~a day)
-	maxSteps     = 200            // transcript steps per answer; the app asks again with the next `after`
-	resultChars  = 400            // tool results are cut to this
-	finalChars   = 8000           // the final result is cut to this
-	summaryChars = 160            // one-line tool input summaries
+	finishedFor  = 7 * 24 * time.Hour // finished delegate runs are listed this long (dispatch keeps their files 30 days)
+	maxSteps     = 200                // transcript steps per answer; the app asks again with the next `after`
+	resultChars  = 400                // tool results are cut to this
+	finalChars   = 8000               // the final result is cut to this
+	summaryChars = 160                // one-line tool input summaries
 )
 
 var (
 	procIDRe  = regexp.MustCompile(`^proc_[A-Za-z0-9]{1,64}$`)
 	runNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	unitRe    = regexp.MustCompile(`^hermes-worker-proc_[A-Za-z0-9]{1,64}\.scope$`)
+	repoRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 )
 
-// Helper answers for the background work Hermes knows about. It reads only processes.json, /proc/<pid>/stat and
-// the stream, progress and result files of delegate runs in Runs, and images /media is asked for (media.go: under
-// Home, by strict rules); never environment variables or other files.
+// Helper answers for the background work Hermes knows about. It reads only processes.json, /proc/<pid>/stat, the
+// stream, progress, result and run.json files of delegate runs in Runs, which dispatch-<name>.service units are
+// active (systemctl --user list-units), and images /media is asked for (media.go: under Home, by strict rules);
+// never environment variables or other files.
 type Helper struct {
-	Processes string                  // Hermes' processes.json
-	Runs      string                  // directory of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...)
-	Proc      string                  // /proc
-	Home      string                  // expands ~ in commands
-	Grace     time.Duration           // SIGTERM → SIGKILL
-	StopUnit  func(unit string) error // systemctl --user stop (injected so tests never call systemctl)
-	Now       func() time.Time
-	Log       *slog.Logger
+	Processes   string                  // Hermes' processes.json
+	Runs        []string                // directories of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...); the first wins
+	ActiveUnits func() map[string]bool  // active dispatch-*.service user units (injected so tests never call systemctl)
+	Proc        string                  // /proc
+	Home        string                  // expands ~ in commands
+	Grace       time.Duration           // SIGTERM → SIGKILL
+	StopUnit    func(unit string) error // systemctl --user stop (injected so tests never call systemctl)
+	Now         func() time.Time
+	Log         *slog.Logger
 }
 
 // Agent is one piece of background work as the app sees it.
@@ -59,6 +62,10 @@ type Agent struct {
 	Alive      bool   `json:"alive"`
 	SessionID  string `json:"session_id,omitempty"` // the Hermes conversation that started it, when Hermes knows it
 	Transcript bool   `json:"transcript"`
+	Repo       string `json:"repo,omitempty"`        // dispatch runs, from <name>.run.json: xMuramasa/<repo>
+	Issue      int    `json:"issue,omitempty"`       // ... the issue number
+	IssueTitle string `json:"issue_title,omitempty"` // ... the issue's title (Title stays the run name)
+	Model      string `json:"model,omitempty"`
 	Progress   string `json:"progress,omitempty"`    // delegate runs: last line of <name>-progress.md
 	Outcome    string `json:"outcome,omitempty"`     // delegate runs: the result line's subtype (success, error_…)
 	NumTurns   int    `json:"num_turns,omitempty"`   // from the result line
@@ -66,6 +73,7 @@ type Agent struct {
 
 	pid, start int64
 	unit       string
+	runUnit    string // dispatch-<name>.service while it is active: how a dispatch run is stopped
 }
 
 // entry is the part of a processes.json record the helper uses; the rest (session_key, task ids, watcher_*) is never
@@ -107,6 +115,16 @@ func (h *Helper) List() ([]Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	var units map[string]bool
+	active := func(u string) bool { // systemctl is asked once per list, and only when a run.json names a unit
+		if units == nil {
+			units = map[string]bool{}
+			if h.ActiveUnits != nil {
+				units = h.ActiveUnits()
+			}
+		}
+		return units[u]
+	}
 	var out []Agent
 	seen := map[string]bool{}
 	for _, e := range entries {
@@ -121,22 +139,28 @@ func (h *Helper) List() ([]Agent, error) {
 		if name, ok := h.delegateName(e.Command); ok && !seen[name] {
 			seen[name] = true
 			a.ID, a.Kind, a.Title = "run_"+name, "delegate", name
-			h.describeRun(&a, name)
+			h.describeRun(&a, name, active)
 		}
 		out = append(out, a)
 	}
-	files, _ := filepath.Glob(filepath.Join(h.Runs, "*.stream.jsonl"))
-	for _, f := range files {
-		name := strings.TrimSuffix(filepath.Base(f), ".stream.jsonl")
-		if seen[name] || !runNameRe.MatchString(name) {
-			continue
+	// A run is its stream, or its run.json alone in the first moments after dispatch starts it.
+	for _, suffix := range []string{".stream.jsonl", ".run.json"} {
+		for _, dir := range h.Runs {
+			files, _ := filepath.Glob(filepath.Join(dir, "*"+suffix))
+			for _, f := range files {
+				name := strings.TrimSuffix(filepath.Base(f), suffix)
+				if seen[name] || !runNameRe.MatchString(name) {
+					continue
+				}
+				if fi, err := os.Stat(f); err != nil || h.Now().Sub(fi.ModTime()) > finishedFor {
+					continue
+				}
+				seen[name] = true
+				a := Agent{ID: "run_" + name, Kind: "delegate", Title: name}
+				h.describeRun(&a, name, active)
+				out = append(out, a)
+			}
 		}
-		if fi, err := os.Stat(f); err != nil || h.Now().Sub(fi.ModTime()) > finishedFor {
-			continue
-		}
-		a := Agent{ID: "run_" + name, Kind: "delegate", Title: name}
-		h.describeRun(&a, name)
-		out = append(out, a)
 	}
 	slices.SortStableFunc(out, func(x, y Agent) int {
 		if x.Alive != y.Alive {
@@ -174,14 +198,49 @@ func (h *Helper) delegateName(command string) (string, bool) {
 		p = filepath.Join(h.Home, rest)
 	}
 	name, ok := strings.CutSuffix(filepath.Base(p), "-launch.sh")
-	return name, ok && filepath.Dir(p) == filepath.Clean(h.Runs) && runNameRe.MatchString(name)
+	return name, ok && slices.ContainsFunc(h.Runs, func(d string) bool { return filepath.Dir(p) == filepath.Clean(d) }) &&
+		runNameRe.MatchString(name)
 }
 
-func (h *Helper) runFile(name, suffix string) string { return filepath.Join(h.Runs, name+suffix) }
+// runFile is a run's file in the first runs directory that has it (in the first directory when none does).
+func (h *Helper) runFile(name, suffix string) string {
+	for _, d := range h.Runs {
+		if p := filepath.Join(d, name+suffix); fileExists(p) {
+			return p
+		}
+	}
+	return filepath.Join(h.Runs[0], name+suffix)
+}
 
-// describeRun fills in a delegate run from its files: cwd from the init line, outcome from the result line, the last
-// progress line.
-func (h *Helper) describeRun(a *Agent, name string) {
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// runInfo is the part of dispatch's <name>.run.json the helper uses.
+type runInfo struct {
+	Repo      string `json:"repo"`
+	Issue     int    `json:"issue"`
+	Title     string `json:"title"`
+	Model     string `json:"model"`
+	StartedAt string `json:"started_at"` // RFC 3339
+	Unit      string `json:"unit"`
+}
+
+// describeRun fills in a delegate run from its files: repo, issue and unit from run.json, cwd from the init line,
+// outcome from the result line, the last progress line.
+func (h *Helper) describeRun(a *Agent, name string, active func(unit string) bool) {
+	var ri runInfo
+	if json.Unmarshal(tail(h.runFile(name, ".run.json"), 16<<10), &ri) == nil { // missing or malformed: no run info
+		if repoRe.MatchString(ri.Repo) && ri.Issue > 0 {
+			a.Repo, a.Issue = ri.Repo, ri.Issue
+		}
+		a.IssueTitle, a.Model = oneLine(ri.Title, 200), oneLine(ri.Model, 40)
+		if t, err := time.Parse(time.RFC3339, ri.StartedAt); err == nil && a.StartedAt == 0 {
+			a.StartedAt = t.Unix()
+		}
+		// Only the run's own unit counts: a renamed -attemptK run.json still names the later attempt's unit.
+		if u := "dispatch-" + name + ".service"; ri.Unit == u && active(u) {
+			a.Alive, a.runUnit = true, u
+		}
+	}
 	stream := h.runFile(name, ".stream.jsonl")
 	fi, err := os.Stat(stream)
 	a.Transcript = err == nil
@@ -392,6 +451,14 @@ func oneLine(s string, n int) string { return cut(strings.Join(strings.Fields(s)
 // Stop ends a listed, live process: its systemd scope if Hermes made one, else SIGTERM to its process group and
 // SIGKILL after Grace. It returns at once; the stop finishes in the background.
 func (h *Helper) Stop(a Agent) bool {
+	if a.Alive && a.runUnit != "" { // a dispatch run: its unit holds the process tree
+		go func() {
+			if err := h.StopUnit(a.runUnit); err != nil {
+				h.Log.Warn("systemctl stop failed", "id", a.ID, "err", err.Error())
+			}
+		}()
+		return true
+	}
 	if !a.Alive || a.start == 0 || a.pid <= 1 || a.pid == int64(os.Getpid()) || !h.running(a.pid, a.start) {
 		return false
 	}
