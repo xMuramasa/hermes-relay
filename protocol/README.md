@@ -27,13 +27,17 @@ A device has at most 3 sockets; a 4th closes the oldest. A revoked device is dis
 | `auth` | `token` | first message only |
 | `subscribe` | `session_id`, `after_seq?` | |
 | `unsubscribe` | `session_id` | |
-| `prompt` | `client_msg_id`, `session_id`, `text` | `client_msg_id` = a UUID per message; resending it never starts a second run |
+| `prompt` | `client_msg_id`, `session_id`, `text`, `attachments?` | `client_msg_id` = a UUID per message; resending it never starts a second run. `attachments`: 1-4 unique ids from `POST /api/attachments` (64 lowercase hex); `text` may be `""` only with at least one |
 | `stop` | `run_id` | |
 | `steer` | `run_id`, `text` | only while the run is `running` |
 | `approve` | `run_id`, `request_id`, `choice` | `once` \| `session` \| `deny` (`always` is refused) |
 | `ping` | | |
 
 `stop`, `steer` and `approve` need a subscription to the run's session.
+
+Images are uploaded over REST first (`POST /api/attachments`, see SPEC.md), then named in `prompt.attachments`. An
+unknown id is `error bad_request` ("unknown attachment"), more than 7 MiB of images in one prompt `error too_large`,
+both with `ref` = the `client_msg_id`. During an active run an image prompt gets `busy` like any prompt; steers stay text.
 
 ## Relay → phone
 

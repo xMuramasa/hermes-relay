@@ -34,7 +34,8 @@ var (
 )
 
 // Helper answers for the background work Hermes knows about. It reads only processes.json, /proc/<pid>/stat and
-// the stream, progress and result files of delegate runs in Runs; never environment variables or other files.
+// the stream, progress and result files of delegate runs in Runs, and images /media is asked for (media.go: under
+// Home, by strict rules); never environment variables or other files.
 type Helper struct {
 	Processes string                  // Hermes' processes.json
 	Runs      string                  // directory of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...)
@@ -427,9 +428,10 @@ func (h *Helper) kill(pid, start int64) {
 	}
 }
 
-// Handler serves GET /agents, GET /agents/{id}/transcript?after=N and POST /agents/{id}/stop.
+// Handler serves GET /agents, GET /agents/{id}/transcript?after=N, POST /agents/{id}/stop and GET /media?path=….
 func (h *Helper) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /media", h.serveMedia)
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		list, err := h.List()
 		if err != nil {

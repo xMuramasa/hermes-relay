@@ -26,25 +26,38 @@ func New(socket string) *Client {
 	}}}
 }
 
+// MaxMedia caps an image from GET /media (the helper's own cap).
+const MaxMedia = 10 << 20
+
 // Do sends one request (path like /agents/run_x/transcript) and returns the helper's status and body. An error means
 // the helper could not be reached.
 func (c *Client) Do(ctx context.Context, method, path string, q url.Values) (int, []byte, error) {
+	st, _, b, err := c.send(ctx, method, path, q, maxBody)
+	return st, b, err
+}
+
+// Media asks the helper for an image file (GET /media?path=…) and returns its status, Content-Type and bytes.
+func (c *Client) Media(ctx context.Context, path string) (int, string, []byte, error) {
+	return c.send(ctx, http.MethodGet, "/media", url.Values{"path": {path}}, MaxMedia)
+}
+
+func (c *Client) send(ctx context.Context, method, path string, q url.Values, limit int) (int, string, []byte, error) {
 	u := url.URL{Scheme: "http", Host: "agents", Path: path, RawQuery: q.Encode()}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, "", nil, err
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, "", nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
-		return 0, nil, err
+		return 0, "", nil, err
 	}
-	if len(b) > maxBody {
-		return 0, nil, fmt.Errorf("answer over %d bytes", maxBody)
+	if len(b) > limit {
+		return 0, "", nil, fmt.Errorf("answer over %d bytes", limit)
 	}
-	return resp.StatusCode, b, nil
+	return resp.StatusCode, resp.Header.Get("Content-Type"), b, nil
 }

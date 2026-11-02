@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -17,6 +18,7 @@ import (
 type Store struct {
 	db  *sql.DB
 	now func() time.Time
+	dir string // attachment files
 }
 
 // migrations[i] moves the schema from version i to i+1 (PRAGMA user_version).
@@ -81,6 +83,23 @@ var migrations = []string{
 		provider TEXT NOT NULL,
 		model TEXT NOT NULL
 	);`,
+	// Image attachments (#25): the files live in <data dir>/attachments/<id>; Hermes keeps no images.
+	`CREATE TABLE attachments (
+		id TEXT PRIMARY KEY,
+		mime TEXT NOT NULL,
+		bytes INTEGER NOT NULL,
+		width INTEGER NOT NULL,
+		height INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		claimed_at INTEGER
+	);
+	CREATE TABLE run_attachments (
+		run_id TEXT NOT NULL,
+		idx INTEGER NOT NULL,
+		attachment_id TEXT NOT NULL REFERENCES attachments(id),
+		PRIMARY KEY (run_id, idx)
+	);
+	CREATE INDEX run_attachments_attachment ON run_attachments(attachment_id);`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.
@@ -92,7 +111,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
-	s := &Store{db: db, now: time.Now}
+	s := &Store{db: db, now: time.Now, dir: filepath.Join(filepath.Dir(path), "attachments")}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -172,11 +191,22 @@ func (s *Store) Cleanup(ctx context.Context) (events int64, err error) {
 		return 0, err
 	}
 	events, _ = res.RowsAffected()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM runs WHERE status IN ('completed','failed','cancelled') AND updated_at < ?`, cut); err != nil {
+	// Runs with images stay: the messages proxy matches them to the history by their created_at.
+	if _, err = tx.ExecContext(ctx, `DELETE FROM runs WHERE status IN ('completed','failed','cancelled') AND updated_at < ?
+		AND run_id NOT IN (SELECT run_id FROM run_attachments)`, cut); err != nil {
 		return 0, err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM pair_codes WHERE expires_at < ? OR used_at IS NOT NULL`, s.ms()); err != nil {
 		return 0, err
 	}
-	return events, tx.Commit()
+	unclaimed, err := deleteAttachments(ctx, tx, `SELECT id FROM attachments WHERE claimed_at IS NULL AND created_at < ?`,
+		s.ms()-UnclaimedTTL.Milliseconds())
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.removeFiles(unclaimed)
+	return events, nil
 }

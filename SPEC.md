@@ -91,7 +91,7 @@ Limits:
 - One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
   [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log,
-  session tags, handoff links and per-session model choices.
+  session tags, handoff links, per-session model choices and image attachments (files in `/data/attachments/`).
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
   nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
   `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
@@ -156,6 +156,35 @@ Limits:
   the link (no existence check). Answers `{"from": ...}` as stored. `GET /api/links` → `{"continues": {"<newer>":
   "<older>"}}`. Deleting a session through the relay drops the links on both sides of it (leaving two shorter
   chains) and its model choice; ids deleted elsewhere may linger, as with tags.
+- Image attachments (#25; WebSocket messages are capped at 64 KiB, so images have their own upload path; Hermes keeps
+  only the text plus a `[screenshot]` line, never the image, so the relay stores them):
+  - `POST /api/attachments`, `manager` only (`forbidden` for viewers). Body: the image bytes, `Content-Type`
+    `image/png`, `image/jpeg` or `image/gif`, at most 8 MiB (else `too_large`, 413). The bytes must decode as that
+    type (`image.DecodeConfig`; else `bad_request`). Answers 201, or 200 when the same bytes were already there:
+    `{"id": "<sha256 hex, 64>", "mime", "width", "height", "bytes"}`. Uploads no prompt used within 1 h are deleted
+    (by the hourly cleanup, so after 1-2 h; uploading the same bytes again restarts the hour).
+  - `GET /api/attachments/:id`, any device: the bytes with their `Content-Type`, `Cache-Control: private,
+    max-age=31536000, immutable`, `ETag: "<id>"` (`If-None-Match` → 304); `not_found` otherwise.
+  - A `prompt` may carry `attachments` (see WebSocket). The relay sends Hermes `POST /v1/runs` with `"input": [{"role":
+    "user", "content": [{"type": "text", "text"}, {"type": "image_url", "image_url": {"url": "data:<mime>;base64,…"}},
+    …]}]` (no text part when the text is empty); the files are read and the data URLs built only for that request,
+    never logged.
+  - `GET /api/sessions/:id/messages` adds `"attachments": [{"id", "mime", "width", "height"}]` to the user messages that
+    relay runs with images produced: the session's runs with images in `created_at` order, each matched to the first
+    unmatched user message of the page whose `timestamp` is within [created_at − 5 s, created_at + 120 s]. Other fields
+    are passed on unchanged. Matching is per page, so a page that starts just after an image run's message may show
+    that run's images on a user message of the next 2 minutes.
+  - Storage: files `/data/attachments/<id>`, tables `attachments` and `run_attachments`. Runs with images are kept past
+    the 24 h run cleanup (the history needs their time). Deleting a session through the relay drops its links and the
+    files no other run uses.
+- A conversation's images on the host (#26): Hermes' `MEDIA:<path>` lines in answers (`/v1/runs` doesn't resolve
+  them) and Telegram's `[Image attached at: <path>]` notes (the images live in `~/.hermes/cache/images/`).
+  `GET /api/sessions/:id/media?path=<absolute path>`, any device: served only if the path occurs in that session's
+  messages from Hermes, as an assistant message's `MEDIA:` tag or a user message's image note; anything else is
+  `not_found`, which never says whether the file exists. The relay reads the session's messages (500 a page, up to
+  10000) and caches its paths 60 s. The bytes come from the agents helper's `GET /media?path=` (see Background agents;
+  the helper applies its own path rules): 200 with the image's `Content-Type` and `Cache-Control: private,
+  max-age=3600`; the helper's 404 is `not_found`; the helper not set up or not running is 503 `hermes_unavailable`.
 - `POST /api/pair {code, name?}` → `{token, device}` (no auth; rate limited; the name comes from `pair --name`, a
   `name` in the body is ignored), `GET /healthz` (no auth, no details).
 - `GET /api/me` → `{device, role}` (the device's name and `manager` or `viewer`): how an app learns its role.
@@ -284,13 +313,20 @@ helper does the work and the relay passes its JSON on.
   is logged with the id, device and outcome.
 - Ids are checked by the relay (`proc_` + up to 64 letters/digits, or `run_` + a name of letters, digits, `.`, `_`,
   `-`) before the helper is asked; any other `:id` is `not_found`.
+- The helper also serves chat images for `GET /api/sessions/:id/media` (#26): `GET /media?path=<absolute path>`, only
+  a clean absolute path that, as asked and with symlinks resolved, lies under the user's home with no component
+  starting with `.` except under `~/.hermes/cache/`; a regular file with extension png, jpg, jpeg, gif or webp whose
+  first bytes match it (`http.DetectContentType`); at most 10 MiB. 200 with `Content-Type` and `Cache-Control:
+  private, max-age=3600`, else 404.
 
 ### WebSocket `/ws`
 
 Messages are JSON objects with a `type` field, defined in `protocol/schema.json`.
 
 - Phone → relay: `auth {token}` (must be the first message, within 5 s), `subscribe {session_id, after_seq?}`,
-  `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text}`, `stop {run_id}`, `steer {run_id, text}`,
+  `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text, attachments?}` (`attachments`: 1-4 unique
+  upload ids; `text` may be `""` only with at least one; an unknown id is `bad_request` "unknown attachment", more than
+  7 MiB of images in one prompt `too_large`; steers stay text only), `stop {run_id}`, `steer {run_id, text}`,
   `approve {run_id, request_id, choice: once|session|deny}`, `ping`.
 - Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}` (`ts` in unix
   ms), `run {run_id, session_id, status}` (`running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`; live

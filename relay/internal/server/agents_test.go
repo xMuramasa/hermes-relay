@@ -14,10 +14,11 @@ import (
 
 // fakeAgents is the host helper on a temp Unix socket: one live delegate run, run_issue-9.
 type fakeAgents struct {
-	sock string
-	mu   sync.Mutex
-	reqs []string
-	body string // GET /agents answers this when set
+	sock  string
+	mu    sync.Mutex
+	reqs  []string
+	body  string            // GET /agents answers this when set
+	media map[string][]byte // GET /media?path= serves these as image/png
 }
 
 func newFakeAgents(t *testing.T) *fakeAgents {
@@ -36,7 +37,13 @@ func (f *fakeAgents) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.reqs = append(f.reqs, r.Method+" "+r.URL.RequestURI())
 	body := f.body
+	img, ok := f.media[r.URL.Query().Get("path")]
 	f.mu.Unlock()
+	if r.URL.Path == "/media" && ok {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(img)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method + " " + r.URL.Path {
 	case "GET /agents":
@@ -53,6 +60,12 @@ func (f *fakeAgents) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no such running agent"}}`))
 	}
+}
+
+func (f *fakeAgents) setMedia(m map[string][]byte) {
+	f.mu.Lock()
+	f.media = m
+	f.mu.Unlock()
 }
 
 func (f *fakeAgents) requests() string {

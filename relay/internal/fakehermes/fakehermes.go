@@ -147,7 +147,8 @@ type Fake struct {
 	createFail  int
 	retryAfter  string
 	CreateCalls int
-	RunInputs   []string
+	RunInputs   []string // the text, or the raw JSON of a list input
+	messages    map[string][]map[string]any
 	RunModels   []string // "provider/model" per created run, "" when the body named none
 	Approvals   []ApprovalCall
 	Stops       []string
@@ -285,7 +286,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("GET /api/sessions/{id}", f.getSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", f.patchSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", f.deleteSession)
-	mux.HandleFunc("GET /api/sessions/{id}/messages", f.messages)
+	mux.HandleFunc("GET /api/sessions/{id}/messages", f.sessionMessages)
 	mux.HandleFunc("POST /api/sessions/{id}/model", f.lockModel)
 	mux.HandleFunc("GET /api/model/options", f.modelOptions)
 	mux.HandleFunc("POST /v1/runs", f.createRun)
@@ -416,13 +417,41 @@ func (f *Fake) deleteSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"object": "hermes.session.deleted", "id": s.ID, "deleted": true})
 }
 
-func (f *Fake) messages(w http.ResponseWriter, r *http.Request) {
+// SetMessages sets a session's history (Hermes' message objects, oldest first).
+func (f *Fake) SetMessages(sessionID string, msgs []map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if s := f.session(w, r); s != nil {
-		writeJSON(w, 200, map[string]any{"object": "list", "session_id": s.ID, "data": []any{},
-			"pagination": map[string]any{"limit": 500, "offset": 0, "returned": 0}})
+	if f.messages == nil {
+		f.messages = map[string][]map[string]any{}
 	}
+	f.messages[sessionID] = msgs
+}
+
+// RunInputsSeen returns the input of each created run, in order.
+func (f *Fake) RunInputsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.RunInputs...)
+}
+
+// sessionMessages honors limit and offset (default limit 500, like Hermes).
+func (f *Fake) sessionMessages(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.session(w, r)
+	if s == nil {
+		return
+	}
+	data := f.messages[s.ID]
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil {
+		limit = 500
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	data = data[min(offset, len(data)):]
+	data = data[:min(limit, len(data))]
+	writeJSON(w, 200, map[string]any{"object": "list", "session_id": s.ID, "data": append([]map[string]any{}, data...),
+		"pagination": map[string]any{"limit": limit, "offset": offset, "returned": len(data)}})
 }
 
 // FailModelOptions makes GET /api/model/options answer status (0 to stop).
@@ -529,14 +558,27 @@ func (f *Fake) lockModel(w http.ResponseWriter, r *http.Request) {
 
 func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Input     string `json:"input"`
-		SessionID string `json:"session_id"`
-		Provider  string `json:"provider"`
-		Model     string `json:"model"`
+		Input     json.RawMessage `json:"input"`
+		SessionID string          `json:"session_id"`
+		Provider  string          `json:"provider"`
+		Model     string          `json:"model"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json"})
 		return
+	}
+	// input: a string, or a list of {role, content} messages (content: a string or text/image_url parts).
+	input := ""
+	if json.Unmarshal(body.Input, &input) != nil {
+		var msgs []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(body.Input, &msgs) != nil || len(msgs) == 0 || msgs[len(msgs)-1].Role != "user" {
+			writeJSON(w, 400, map[string]any{"error": "input must be a string or a list of messages ending with a user one"})
+			return
+		}
+		input = string(body.Input)
 	}
 	key := r.Header.Get("Idempotency-Key")
 	f.mu.Lock()
@@ -592,7 +634,7 @@ func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 		run.frames = append(run.frames, b)
 	}
 	f.runs[id] = run
-	f.RunInputs = append(f.RunInputs, body.Input)
+	f.RunInputs = append(f.RunInputs, input)
 	if body.Provider != "" || body.Model != "" {
 		f.RunModels = append(f.RunModels, body.Provider+"/"+body.Model)
 	} else {

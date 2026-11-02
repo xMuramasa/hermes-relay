@@ -114,7 +114,7 @@ func TestStoreFailureKeepsAnswer(t *testing.T) {
 		}
 		return false
 	}
-	if err := h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000009", sid, "what is 2+2?", func(string, bool) {}); err != nil {
+	if err := h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000009", sid, "what is 2+2?", nil, func(string, bool) {}); err != nil {
 		t.Fatal(err)
 	}
 	got := rec.until(t, isRunEnd)
@@ -167,7 +167,7 @@ func TestConcurrentResendSameRun(t *testing.T) {
 	for range 2 {
 		go func() {
 			var r result
-			r.err = h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000007", sid, "what is 2+2?",
+			r.err = h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000007", sid, "what is 2+2?", nil,
 				func(id string, replayed bool) { r.runID, r.replayed = id, replayed })
 			once.Do(func() { close(firstDone) })
 			results <- r

@@ -5,6 +5,7 @@ package hermes
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -271,13 +272,31 @@ type RunModel struct {
 	Model    string
 }
 
+// Image is a prompt's image, sent to Hermes as a data URL.
+type Image struct {
+	Mime string
+	Data []byte
+}
+
 // CreateRun starts a run. A chosen model rides in the body because Hermes' /v1/runs ignores the persisted
 // session lock that POST /api/sessions/{id}/model sets (only /api/sessions/{id}/chat reads it); an explicit
-// provider is always honored there.
-func (c *Client) CreateRun(ctx context.Context, sessionID, input, idempotencyKey string, model RunModel) (RunCreated, error) {
+// provider is always honored there. With images, input is one user message of content parts (the text part
+// left out when the text is empty); the data URLs exist only inside this call.
+func (c *Client) CreateRun(ctx context.Context, sessionID, input, idempotencyKey string, model RunModel, images []Image) (RunCreated, error) {
 	var out RunCreated
 	hdr := http.Header{"Idempotency-Key": {idempotencyKey}}
-	body := map[string]string{"input": input, "session_id": sessionID}
+	body := map[string]any{"input": input, "session_id": sessionID}
+	if len(images) > 0 {
+		var parts []any
+		if input != "" {
+			parts = append(parts, map[string]string{"type": "text", "text": input})
+		}
+		for _, im := range images {
+			url := "data:" + im.Mime + ";base64," + base64.StdEncoding.EncodeToString(im.Data)
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": url}})
+		}
+		body["input"] = []any{map[string]any{"role": "user", "content": parts}}
+	}
 	if model.Provider != "" && model.Model != "" {
 		body["provider"], body["model"] = model.Provider, model.Model
 	}

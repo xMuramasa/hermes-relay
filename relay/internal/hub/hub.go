@@ -43,7 +43,12 @@ type eventStore interface {
 	InsertRun(ctx context.Context, r store.Run) error
 	RunByClientMsgID(ctx context.Context, clientMsgID string) (store.Run, error)
 	SessionModelFor(ctx context.Context, sessionID string) (store.SessionModel, bool, error)
+	Attachments(ctx context.Context, ids []string) ([]store.Attachment, error)
+	ReadAttachment(id string) ([]byte, error)
 }
+
+// MaxPromptImageBytes caps the images of one prompt.
+const MaxPromptImageBytes = 7 << 20
 
 // Hub is safe for concurrent use.
 type Hub struct {
@@ -312,7 +317,7 @@ const SourceAPIServer = "api_server"
 // Prompt starts a run for clientMsgID, or acknowledges the run it already started. onAck runs before any of the
 // run's events are delivered. Only the first of concurrent calls for one clientMsgID looks it up and starts the run;
 // checking the database first would let a resend miss both the row (not stored yet) and the inflight entry (gone).
-func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, onAck func(runID string, replayed bool)) error {
+func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, attachments []string, onAck func(runID string, replayed bool)) error {
 	h.mu.Lock()
 	if p := h.inflight[clientMsgID]; p != nil {
 		h.mu.Unlock()
@@ -337,7 +342,7 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID
 	} else if !errors.Is(err, store.ErrNotFound) {
 		p.err = protocol.Errorf(protocol.CodeInternal, "internal error")
 	} else {
-		p.runID, p.err = h.startRun(ctx, deviceID, clientMsgID, sessionID, text, onAck)
+		p.runID, p.err = h.startRun(ctx, deviceID, clientMsgID, sessionID, text, attachments, onAck)
 	}
 	h.mu.Lock()
 	delete(h.inflight, clientMsgID)
@@ -346,13 +351,27 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID
 	return p.err
 }
 
-func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, onAck func(string, bool)) (string, error) {
+func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, ids []string, onAck func(string, bool)) (string, error) {
 	src, err := h.SessionSource(ctx, sessionID)
 	if err != nil {
 		return "", hermes.ProtocolError(err)
 	}
 	if src != SourceAPIServer {
 		return "", protocol.Errorf(protocol.CodeReadOnly, "this session belongs to %s and is read-only here", trunc(src, 32))
+	}
+	atts, err := h.store.Attachments(ctx, ids)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", protocol.Errorf(protocol.CodeBadRequest, "unknown attachment")
+	} else if err != nil {
+		h.log.Error("reading attachments failed", "session_id", sessionID, "err", err.Error())
+		return "", protocol.Errorf(protocol.CodeInternal, "internal error")
+	}
+	var total int64
+	for _, a := range atts {
+		total += a.Bytes
+	}
+	if total > MaxPromptImageBytes {
+		return "", protocol.Errorf(protocol.CodeTooLarge, "more than 7 MiB of images in one prompt")
 	}
 	s := h.lockSession(sessionID)
 	if s.active != nil || s.starting {
@@ -372,7 +391,7 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 
 	// Detached from the socket: if the phone drops now, Hermes may still start the run, and the resend with the
 	// same client_msg_id finds it through the Idempotency-Key.
-	created, err := h.hermes.CreateRun(context.WithoutCancel(ctx), sessionID, text, clientMsgID, model)
+	created, err := h.createRun(context.WithoutCancel(ctx), sessionID, text, clientMsgID, model, atts)
 
 	s.mu.Lock()
 	s.starting = false
@@ -383,7 +402,7 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 	}
 	defer h.unlockSession(s)
 	if err := h.store.InsertRun(context.Background(), store.Run{RunID: created.RunID, SessionID: sessionID,
-		ClientMsgID: clientMsgID, DeviceID: deviceID, Status: protocol.StatusRunning}); err != nil {
+		ClientMsgID: clientMsgID, DeviceID: deviceID, Status: protocol.StatusRunning, Attachments: ids}); err != nil {
 		h.log.Error("storing run failed", "run_id", created.RunID, "err", err.Error())
 		return "", protocol.Errorf(protocol.CodeInternal, "internal error")
 	}
@@ -406,6 +425,19 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 	h.log.Info("run started", "session_id", sessionID, "run_id", rs.id, "device_id", deviceID, "replayed", created.Replayed)
 	go h.track(rs, false)
 	return rs.id, nil
+}
+
+// createRun reads the prompt's images only now, so their bytes and data URLs live just for the Hermes request.
+func (h *Hub) createRun(ctx context.Context, sessionID, text, clientMsgID string, model hermes.RunModel, atts []store.Attachment) (hermes.RunCreated, error) {
+	images := make([]hermes.Image, len(atts))
+	for i, a := range atts {
+		b, err := h.store.ReadAttachment(a.ID)
+		if err != nil {
+			return hermes.RunCreated{}, protocol.Errorf(protocol.CodeBadRequest, "unknown attachment")
+		}
+		images[i] = hermes.Image{Mime: a.Mime, Data: b}
+	}
+	return h.hermes.CreateRun(ctx, sessionID, text, clientMsgID, model, images)
 }
 
 // controllable finds an active run that sub may act on: only subscribers of the run's session.
