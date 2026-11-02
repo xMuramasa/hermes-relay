@@ -5,13 +5,8 @@ node_modules/
 *.db
 *.db-wal
 *.db-shm
-.expo/
 dist/
 build/
-android/
-ios/
-*.apk
-*.aab
 *.keystore
 *.jks
 .DS_Store
