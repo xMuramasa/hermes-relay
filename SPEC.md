@@ -387,9 +387,9 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
   (#8); the duplicate filter keeps new events after `replay_gap` (#10); late history never shows an answer twice
   (#11); Stop, steer, reconnect with backoff, settings and an offline cache (#14); approvals and notifications (#15);
   an icon and splash (#17). trismegistus-mac's TrismegistusKit already implements and tests the #6-#11 rules.
-- Open before the build: Penpot phone frames first or straight to code; whether the phone stays a `viewer` or becomes
-  a `manager`; notifications while the app is closed (a foreground service holding the socket, or self-hosted push
-  through ntfy / UnifiedPush, which needs a relay change); the first version's scope.
+- Lives in `xMuramasa/trismegistus-android` (spec v1 there, 2026-11-02): Kotlin + Jetpack Compose, Penpot phone
+  frames first, the phone paired as a `manager`, notifications through self-hosted ntfy / UnifiedPush (relay side:
+  #28), Chat with approvals and notifications first.
 
 ## Dev setups
 
@@ -411,7 +411,8 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 - LAN and tailnet only (no public DNS), TLS from Caddy.
 - A paired, unlocked phone can approve commands that run on optiplex. No fingerprint check for now (one user); the
   approval prompt is the only gate. A biometric check can be added later.
-- Push notifications, if the Android app gets them, carry no content: just "Reply ready" or "Approval needed".
+- Push notifications to Android devices (#28, through the homelab's ntfy, no Firebase) carry no content: one word,
+  `approval` or `run`; the app fetches the details over its own socket.
 
 ## Phases
 
