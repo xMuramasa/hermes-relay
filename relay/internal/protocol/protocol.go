@@ -102,15 +102,16 @@ func CodeOf(err error) string {
 
 // Inbound is any phone → relay message, decoded after schema validation.
 type Inbound struct {
-	Type        string `json:"type"`
-	Token       string `json:"token,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	AfterSeq    *int64 `json:"after_seq,omitempty"`
-	ClientMsgID string `json:"client_msg_id,omitempty"`
-	Text        string `json:"text,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
-	Choice      string `json:"choice,omitempty"`
+	Type        string   `json:"type"`
+	Token       string   `json:"token,omitempty"`
+	SessionID   string   `json:"session_id,omitempty"`
+	AfterSeq    *int64   `json:"after_seq,omitempty"`
+	ClientMsgID string   `json:"client_msg_id,omitempty"`
+	Text        string   `json:"text,omitempty"`
+	RunID       string   `json:"run_id,omitempty"`
+	RequestID   string   `json:"request_id,omitempty"`
+	Choice      string   `json:"choice,omitempty"`
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // Outbound messages (relay → phone).

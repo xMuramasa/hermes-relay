@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -91,6 +92,35 @@ func TestEventsKeepalivesKeepStreamAlive(t *testing.T) {
 	}
 }
 
+// Images go as one user message of content parts; without text there is no text part, without images input stays a string.
+func TestCreateRunImages(t *testing.T) {
+	var bodies []string
+	c := newTest(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		fmt.Fprint(w, `{"run_id":"run_1","status":"started"}`)
+	})
+	png := Image{Mime: "image/png", Data: []byte{0x89, 'P', 'N', 'G'}}
+	for _, text := range []string{"what is this?", ""} {
+		if _, err := c.CreateRun(context.Background(), "s", text, "k", RunModel{}, []Image{png, {Mime: "image/gif", Data: []byte("GIF89a")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateRun(context.Background(), "s", "plain", "k", RunModel{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"input":[{"content":[{"text":"what is this?","type":"text"},{"image_url":{"url":"data:image/png;base64,iVBORw=="},"type":"image_url"},{"image_url":{"url":"data:image/gif;base64,R0lGODlh"},"type":"image_url"}],"role":"user"}],"session_id":"s"}`,
+		`{"input":[{"content":[{"image_url":{"url":"data:image/png;base64,iVBORw=="},"type":"image_url"},{"image_url":{"url":"data:image/gif;base64,R0lGODlh"},"type":"image_url"}],"role":"user"}],"session_id":"s"}`,
+		`{"input":"plain","session_id":"s"}`,
+	}
+	for i := range want {
+		if bodies[i] != want[i] {
+			t.Errorf("body %d:\n got %s\nwant %s", i, bodies[i], want[i])
+		}
+	}
+}
+
 func TestErrorMapping(t *testing.T) {
 	status := 503
 	c := newTest(t, func(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +134,7 @@ func TestErrorMapping(t *testing.T) {
 	}
 	for st, code := range cases {
 		status = st
-		_, err := c.CreateRun(context.Background(), "s", "hi", "k", RunModel{})
+		_, err := c.CreateRun(context.Background(), "s", "hi", "k", RunModel{}, nil)
 		pe := ProtocolError(err)
 		if pe.Code != code {
 			t.Errorf("%d → %s, want %s", st, pe.Code, code)

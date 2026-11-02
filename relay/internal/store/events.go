@@ -135,18 +135,35 @@ type Run struct {
 	DeviceID    int64
 	Status      string
 	HermesSeq   int64
+	Attachments []string // image ids the prompt carried (InsertRun only)
 }
 
-// InsertRun records a new run. A run that already exists is left as is.
+// InsertRun records a new run and claims its images. A run that already exists is left as is.
 func (s *Store) InsertRun(ctx context.Context, r Run) error {
 	now := s.ms()
 	var cmid any
 	if r.ClientMsgID != "" {
 		cmid = r.ClientMsgID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (run_id, session_id, client_msg_id, device_id, status, hermes_seq, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, -1, ?, ?) ON CONFLICT DO NOTHING`, r.RunID, r.SessionID, cmid, r.DeviceID, r.Status, now, now)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs (run_id, session_id, client_msg_id, device_id, status, hermes_seq, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, -1, ?, ?) ON CONFLICT DO NOTHING`, r.RunID, r.SessionID, cmid, r.DeviceID, r.Status, now, now); err != nil {
+		return err
+	}
+	for i, id := range r.Attachments {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO run_attachments (run_id, idx, attachment_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+			r.RunID, i, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE attachments SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL`, now, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func scanRun(row interface{ Scan(...any) error }) (Run, error) {

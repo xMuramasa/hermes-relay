@@ -72,6 +72,7 @@ type Server struct {
 
 	pairIP, pairAll, prompts *limiter
 	modelCache               modelCache
+	media                    mediaCache
 
 	mu      sync.Mutex
 	closing bool
@@ -137,6 +138,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/agents", s.logged(s.authed(s.listAgents)))
 	mux.HandleFunc("GET /api/agents/{id}/transcript", s.logged(s.authed(s.agentTranscript)))
 	mux.HandleFunc("POST /api/agents/{id}/stop", manage(s.stopAgent))
+	// Image attachments (attachments.go, #25): managers upload, every device downloads.
+	mux.HandleFunc("POST /api/attachments", manage(s.uploadAttachment))
+	mux.HandleFunc("GET /api/attachments/{id}", s.logged(s.authed(s.getAttachment)))
+	// Images on the host named in a session's messages (media.go, #26), through the agents helper.
+	mux.HandleFunc("GET /api/sessions/{id}/media", s.logged(s.authed(s.sessionMedia)))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)

@@ -202,6 +202,9 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request, _ store
 	}
 	resp, err := s.hermes.Do(r.Context(), http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"/messages",
 		allowQuery(r.URL.Query(), "limit", "offset", "order", "before", "after"), nil, nil)
+	if err == nil {
+		resp.Body = s.withAttachments(r.Context(), id, resp.Body)
+	}
 	s.relay(w, resp, err)
 }
 
@@ -290,6 +293,9 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request, dev store
 		}
 		if err := s.store.ForgetSession(r.Context(), id); err != nil {
 			s.log.Error("dropping links and model failed", "session_id", id, "err", err.Error())
+		}
+		if err := s.store.DropSessionAttachments(r.Context(), id); err != nil {
+			s.log.Error("dropping attachments failed", "session_id", id, "err", err.Error())
 		}
 		s.log.Info("session deleted", "session_id", id, "device", dev.Name)
 	}

@@ -408,7 +408,7 @@ func TestMigrationToLinks(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	if v, _ := s.Version(); v != 4 {
+	if v, _ := s.Version(); v != len(migrations) {
 		t.Fatalf("version %d", v)
 	}
 	if tags, err := s.SessionTags(ctx); err != nil || tags["s1"][0] != "work" {
