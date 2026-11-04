@@ -291,14 +291,14 @@ func (w *wsConn) handle(in protocol.Inbound) {
 		}
 		w.async(in.ClientMsgID, func(ctx context.Context) error {
 			_ = s.store.TouchDevice(ctx, w.dev.ID)
-			return s.hub.Prompt(ctx, w.dev.ID, in.ClientMsgID, in.SessionID, in.Text, in.Attachments, func(runID string, replayed bool) {
+			return s.hub.Prompt(ctx, w.dev.ID, w.dev.Name, in.ClientMsgID, in.SessionID, in.Text, in.Attachments, func(runID string, replayed bool) {
 				w.deliver(protocol.Ack{Type: "ack", ClientMsgID: in.ClientMsgID, RunID: runID, Replayed: replayed})
 			})
 		})
 	case "stop":
 		w.async(in.RunID, func(ctx context.Context) error { return s.hub.Stop(ctx, w, in.RunID) })
 	case "steer":
-		w.async(in.RunID, func(ctx context.Context) error { return s.hub.Steer(ctx, w, in.RunID, in.Text) })
+		w.async(in.RunID, func(ctx context.Context) error { return s.hub.Steer(ctx, w, w.dev.Name, in.RunID, in.Text) })
 	case "approve":
 		w.async(in.RunID, func(ctx context.Context) error {
 			return s.hub.Approve(ctx, w, in.RunID, in.RequestID, in.Choice)

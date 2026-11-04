@@ -49,7 +49,26 @@ const (
 	KindSteerQueued       = "steer.queued"
 	KindReconnected       = "reconnected"
 	KindUnknown           = "unknown"
+	KindUserMessage       = "user.message"
 )
+
+// UserMessage is a user.message event's data: a prompt or steer as the relay accepted it, so every subscribed
+// device shows it at once instead of waiting for Hermes' history.
+type UserMessage struct {
+	Kind        string             `json:"kind"` // "prompt" or "steer"
+	Text        string             `json:"text"`
+	Device      string             `json:"device"`
+	ClientMsgID string             `json:"client_msg_id,omitempty"`
+	Attachments []UserMessageImage `json:"attachments,omitempty"`
+}
+
+// UserMessageImage names an image a prompt carried, as the session history's attachments do.
+type UserMessageImage struct {
+	ID     string `json:"id"`
+	Mime   string `json:"mime"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
 
 // Run statuses (schema $defs/run_status).
 const (

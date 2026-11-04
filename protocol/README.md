@@ -67,8 +67,10 @@ both with `ref` = the `client_msg_id`. During an active run an image prompt gets
 | `steer.queued` | `{}` (a steer reached Hermes) |
 | `reconnected` | `reason`: `stream_lost` or `relay_restart`; events may be missing before it, the answer still comes |
 | `unknown` | `event` (Hermes' name), `data` (raw, `{}` + `truncated` when over 8 KiB): ignore it |
+| `user.message` | `kind` (`prompt` or `steer`), `text`, `device` (the sender), `client_msg_id?` (the prompt's), `attachments?` (`{id, mime, width, height}`): a user's message as the relay accepted it, so every device shows it at once. A prompt's is its run's first event; a steer's comes just before `steer.queued`. The history has it once Hermes stores it (a prompt within ~50 ms, a steer when Hermes takes it) |
 
-A turn ends with `answer` + `run.completed`, `run.failed` or `run.cancelled`.
+A turn starts with `user.message` (kind `prompt`) and ends with `answer` + `run.completed`, `run.failed` or
+`run.cancelled`. Apps built before `user.message` existed drop it as a frame they can't read.
 
 ### Error codes
 
