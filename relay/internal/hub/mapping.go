@@ -107,7 +107,7 @@ func mapFrame(f hermes.Frame, now time.Time) mapped {
 		evs := one(protocol.KindAnswer, d)
 		evs = append(evs, store.NewEvent{Kind: protocol.KindRunCompleted, Data: []byte("{}"), TS: ts})
 		return mapped{events: evs, status: protocol.StatusCompleted, terminal: true}
-	case "run.failed":
+	case "run.failed", "run.interrupted": // interrupted: the gateway restarted before the run settled
 		d := map[string]any{}
 		if msg := fl.errorText(); msg != "" {
 			d["error"] = trunc(msg, capPreview)

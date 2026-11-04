@@ -42,7 +42,7 @@ func (h *Hub) track(rs *runState, resumed bool) {
 			switch {
 			case ctx.Err() != nil:
 				return
-			case err == nil && protocol.Terminal(st.Status):
+			case err == nil && hermesTerminal(st.Status):
 				if h.finishFromStatus(rs, st) == nil {
 					return
 				}
@@ -104,6 +104,13 @@ func (h *Hub) track(rs *runState, resumed bool) {
 			return
 		}
 	}
+}
+
+// hermesTerminal reports whether a Hermes run status is final. Besides the relay's own three, Hermes has
+// "interrupted": the gateway restarted mid-run, the run will never continue and its event stream is gone (404).
+// Without it such a run looked alive until GiveUp (2 h), and stop did nothing.
+func hermesTerminal(status string) bool {
+	return protocol.Terminal(status) || status == "interrupted"
 }
 
 func streamErr(err error) string {
