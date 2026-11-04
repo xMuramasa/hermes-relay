@@ -117,6 +117,8 @@ type Run struct {
 	EventsGone bool
 	// StatusOverride replaces GET /v1/runs/{id} (e.g. "completed" with the fixture's final body).
 	StatusOverride string
+	// ErrorOverride adds an "error" to that body (e.g. Hermes' reason for "interrupted").
+	ErrorOverride string
 }
 
 // ApprovalCall records POST /v1/runs/{id}/approval.
@@ -683,6 +685,9 @@ func (f *Fake) getRun(w http.ResponseWriter, r *http.Request) {
 	case run.StatusOverride != "":
 		body := rewrite(fx.Final, run)
 		body["status"] = run.StatusOverride
+		if run.ErrorOverride != "" {
+			body["error"] = run.ErrorOverride
+		}
 		writeJSON(w, 200, body)
 	case run.terminal:
 		writeJSON(w, 200, rewrite(fx.Final, run))

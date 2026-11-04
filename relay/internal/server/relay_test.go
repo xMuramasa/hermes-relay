@@ -707,6 +707,30 @@ func TestTerminalFromRunStatus(t *testing.T) {
 	}
 }
 
+// A gateway restart leaves the run "interrupted": its stream 404s while GET /v1/runs/{id} still answers. The relay
+// ends it as failed at once instead of retrying the stream until GiveUp.
+func TestInterruptedRunFails(t *testing.T) {
+	fake := newFake(t, "plain")
+	r := newRelay(t, fake)
+	a := r.connect(r.pair("pixel-8"))
+	sid := fake.AddSession("api_server")
+	hold := make(chan struct{})
+	fake.SetScript(sid, fakehermes.Script{Fixture: fixture(t, "plain"), Hold: map[int]chan struct{}{0: hold}, CutAfter: []int{0}})
+	a.subscribe(sid)
+	_, ack := a.prompt(sid)
+	fake.WithRun(ack.str("run_id"), func(run *fakehermes.Run) {
+		run.EventsGone = true
+		run.StatusOverride = "interrupted"
+		run.ErrorOverride = "The gateway restarted before this run settled."
+	})
+	close(hold)
+	evs := events(a.until(isTerminal))
+	// Hermes' reason, not the relay's "lost contact with Hermes" after GiveUp.
+	if kinds(evs) != "user.message reconnected run.failed" || evs[2].data().str("error") != "The gateway restarted before this run settled." {
+		t.Fatalf("got %q %v", kinds(evs), evs)
+	}
+}
+
 func TestRelayRestartMidRun(t *testing.T) {
 	fake := newFake(t, "tool")
 	r := newRelay(t, fake)

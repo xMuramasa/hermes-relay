@@ -154,6 +154,12 @@ func TestMapCapsAndUnknown(t *testing.T) {
 	if string(r.events[0].Data) != `{"error":"provider down"}` || r.status != protocol.StatusFailed || !r.terminal {
 		t.Fatalf("run.failed %s", r.events[0].Data)
 	}
+	r = mapFrame(frameFrom(t, map[string]any{"event": "run.interrupted", "error": "The gateway restarted before this run settled."}), time.Now())
+	checkEvent(t, r.events[0].Kind, r.events[0].Data)
+	if r.events[0].Kind != protocol.KindRunFailed || string(r.events[0].Data) != `{"error":"The gateway restarted before this run settled."}` ||
+		r.status != protocol.StatusFailed || !r.terminal {
+		t.Fatalf("run.interrupted %s %s", r.events[0].Kind, r.events[0].Data)
+	}
 }
 
 func TestMapTimestamp(t *testing.T) {
