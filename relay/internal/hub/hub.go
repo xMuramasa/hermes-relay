@@ -186,6 +186,11 @@ func runMsg(rs *runState) []byte {
 func (h *Hub) emit(rs *runState, evs []store.NewEvent, upd store.RunUpdate) error {
 	s := h.lockSession(rs.sessionID)
 	defer h.unlockSession(s)
+	return h.emitLocked(s, rs, evs, upd)
+}
+
+// emitLocked is emit with the session lock already held.
+func (h *Hub) emitLocked(s *session, rs *runState, evs []store.NewEvent, upd store.RunUpdate) error {
 	stored, err := h.store.AppendEvents(context.Background(), rs.sessionID, rs.id, evs, upd)
 	if err != nil {
 		h.log.Error("storing events failed", "session_id", rs.sessionID, "run_id", rs.id, "events", len(evs), "err", err.Error())
@@ -317,7 +322,7 @@ const SourceAPIServer = "api_server"
 // Prompt starts a run for clientMsgID, or acknowledges the run it already started. onAck runs before any of the
 // run's events are delivered. Only the first of concurrent calls for one clientMsgID looks it up and starts the run;
 // checking the database first would let a resend miss both the row (not stored yet) and the inflight entry (gone).
-func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, attachments []string, onAck func(runID string, replayed bool)) error {
+func (h *Hub) Prompt(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, attachments []string, onAck func(runID string, replayed bool)) error {
 	h.mu.Lock()
 	if p := h.inflight[clientMsgID]; p != nil {
 		h.mu.Unlock()
@@ -342,7 +347,7 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID
 	} else if !errors.Is(err, store.ErrNotFound) {
 		p.err = protocol.Errorf(protocol.CodeInternal, "internal error")
 	} else {
-		p.runID, p.err = h.startRun(ctx, deviceID, clientMsgID, sessionID, text, attachments, onAck)
+		p.runID, p.err = h.startRun(ctx, deviceID, device, clientMsgID, sessionID, text, attachments, onAck)
 	}
 	h.mu.Lock()
 	delete(h.inflight, clientMsgID)
@@ -351,7 +356,8 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, clientMsgID, sessionID
 	return p.err
 }
 
-func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, sessionID, text string, ids []string, onAck func(string, bool)) (string, error) {
+func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, ids []string, onAck func(string, bool)) (string, error) {
+	arrived := time.Now()
 	src, err := h.SessionSource(ctx, sessionID)
 	if err != nil {
 		return "", hermes.ProtocolError(err)
@@ -391,7 +397,9 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 
 	// Detached from the socket: if the phone drops now, Hermes may still start the run, and the resend with the
 	// same client_msg_id finds it through the Idempotency-Key.
+	asked := time.Now()
 	created, err := h.createRun(context.WithoutCancel(ctx), sessionID, text, clientMsgID, model, atts)
+	hermesMS := time.Since(asked).Milliseconds()
 
 	s.mu.Lock()
 	s.starting = false
@@ -422,7 +430,18 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, clientMsgID, session
 	for sub := range s.subs {
 		sub.Deliver(msg)
 	}
-	h.log.Info("run started", "session_id", sessionID, "run_id", rs.id, "device_id", deviceID, "replayed", created.Replayed)
+	// The prompt itself, as the run's first event: the other devices show it now, not when Hermes has stored it
+	// (a few ms after this) and they reload. A replayed run already has one.
+	if !created.Replayed {
+		um := protocol.UserMessage{Kind: "prompt", Text: text, Device: device, ClientMsgID: clientMsgID}
+		for _, a := range atts {
+			um.Attachments = append(um.Attachments, protocol.UserMessageImage{ID: a.ID, Mime: a.Mime, Width: a.Width, Height: a.Height})
+		}
+		_ = h.emitLocked(s, rs, []store.NewEvent{{Kind: protocol.KindUserMessage, Data: encode(um), TS: time.Now().UnixMilli()}},
+			store.RunUpdate{HermesSeq: -1})
+	}
+	h.log.Info("run started", "session_id", sessionID, "run_id", rs.id, "device_id", deviceID, "replayed", created.Replayed,
+		"hermes_ms", hermesMS, "start_ms", time.Since(arrived).Milliseconds())
 	go h.track(rs, false)
 	return rs.id, nil
 }
@@ -475,8 +494,9 @@ func (h *Hub) Stop(ctx context.Context, sub Subscriber, runID string) error {
 	return h.control(rs, "stop", h.hermes.Stop(context.WithoutCancel(ctx), runID))
 }
 
-// Steer sends extra guidance to a running run; on success a steer.queued event follows.
-func (h *Hub) Steer(ctx context.Context, sub Subscriber, runID, text string) error {
+// Steer sends extra guidance to a running run; on success the steer's text (user.message, for every device) and
+// steer.queued follow.
+func (h *Hub) Steer(ctx context.Context, sub Subscriber, device, runID, text string) error {
 	rs, err := h.controllable(sub, runID)
 	if err != nil {
 		return err
@@ -484,7 +504,11 @@ func (h *Hub) Steer(ctx context.Context, sub Subscriber, runID, text string) err
 	if err := h.control(rs, "steer", h.hermes.Steer(context.WithoutCancel(ctx), runID, text)); err != nil {
 		return err
 	}
-	_ = h.emit(rs, []store.NewEvent{{Kind: protocol.KindSteerQueued, Data: []byte("{}"), TS: time.Now().UnixMilli()}}, store.RunUpdate{HermesSeq: -1})
+	now := time.Now().UnixMilli()
+	_ = h.emit(rs, []store.NewEvent{
+		{Kind: protocol.KindUserMessage, Data: encode(protocol.UserMessage{Kind: "steer", Text: text, Device: device}), TS: now},
+		{Kind: protocol.KindSteerQueued, Data: []byte("{}"), TS: now},
+	}, store.RunUpdate{HermesSeq: -1})
 	return nil
 }
 

@@ -349,7 +349,12 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
   `steer.queued` (sent when Hermes accepts a steer; Hermes' `run.steered` is dropped as a duplicate),
   `reconnected {reason: stream_lost|relay_restart}` (marks a gap: the relay lost the stream or restarted and is
   recovering), `unknown` (anything new; `data` passed through so the app can ignore it, emptied with `truncated`
-  over 8 KiB). `message.delta` is dropped (streaming is off). `data` keeps only the fields the app needs (previews,
+  over 8 KiB). Plus one of the relay's own, not from Hermes: `user.message {kind: prompt|steer, text, device,
+  client_msg_id?, attachments?}`, a user's message as the relay accepted it, so every subscribed device shows it at
+  once (#30; messaging servers push the message itself). A prompt's is its run's first event (none for a replayed
+  `client_msg_id`); a steer's comes right before `steer.queued`. Hermes' history has it too once stored: a prompt
+  ~40 ms after the run starts, a steer when Hermes takes it, so apps dedupe by their outbox and by text and time.
+  Apps that predate it drop the frame (both decode strictly and skip what they can't read), so no opt-in. `message.delta` is dropped (streaming is off). `data` keeps only the fields the app needs (previews,
   durations, error flags, the approval command and description); no usage or cost numbers. Answers over 256 KiB are
   cut and marked `truncated`.
 - Hermes' per-run `seq` is stored with each run; frames at or below it are skipped, so re-reading a stream after a

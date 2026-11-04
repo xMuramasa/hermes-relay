@@ -250,13 +250,13 @@ func TestFixtureRuns(t *testing.T) {
 		answer  string
 		status  string
 	}{
-		{"plain", "answer run.completed", "2 + 2 is 4.", "completed"},
-		{"tool", "tool.started tool.completed answer run.completed", "The terminal printed 2026.", "completed"},
-		{"subagent", "tool.started subagent.started tool.completed subagent.completed answer run.completed",
+		{"plain", "user.message answer run.completed", "2 + 2 is 4.", "completed"},
+		{"tool", "user.message tool.started tool.completed answer run.completed", "The terminal printed 2026.", "completed"},
+		{"subagent", "user.message tool.started subagent.started tool.completed subagent.completed answer run.completed",
 			"Subagent dispatched (sa-0-31a5bc12); I'll report its reply when it comes back.", "completed"},
-		{"approval", "tool.started approval.requested approval.resolved tool.completed answer run.completed",
+		{"approval", "user.message tool.started approval.requested approval.resolved tool.completed answer run.completed",
 			"The command was denied and did not run, so I stopped without retrying.", "completed"},
-		{"stop", "run.cancelled", "", "cancelled"},
+		{"stop", "user.message run.cancelled", "", "cancelled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -290,6 +290,10 @@ func TestFixtureRuns(t *testing.T) {
 				t.Fatalf("kinds: %q, want %q", kinds(evs), tc.kinds)
 			}
 			checkSeqs(t, evs, 1)
+			// The prompt itself comes first, for every device (#30).
+			if d := evs[0].data(); d.str("kind") != "prompt" || d.str("device") != "pixel-8" || d.str("text") == "" || d.str("client_msg_id") == "" {
+				t.Fatalf("user.message data %v", d)
+			}
 			for _, e := range evs {
 				if e.str("run_id") != runID || e.str("session_id") != sid {
 					t.Fatalf("event for another run: %v", e)
@@ -323,7 +327,7 @@ func TestFixtureRuns(t *testing.T) {
 				t.Fatalf("run statuses %v, want %s", statuses, want)
 			}
 			if tc.fixture == "tool" {
-				d := evs[1].data()
+				d := evs[2].data()
 				if d["duration"] != 0.15 || d["error"] != false || d.str("tool") != "terminal" {
 					t.Fatalf("tool.completed data %v", d)
 				}
@@ -463,11 +467,14 @@ func TestStopAndSteerReachHermes(t *testing.T) {
 	}
 	a.send(map[string]any{"type": "stop", "run_id": runID})
 	evs := events(append(got, a.until(isTerminal)...))
-	if kinds(evs) != "steer.queued run.cancelled" {
+	if kinds(evs) != "user.message user.message steer.queued run.cancelled" {
 		t.Fatalf("kinds %q", kinds(evs))
 	}
 	checkSeqs(t, evs, 1)
-	if d := evs[1].data(); d.str("reason") != "interrupted_during_api_call" {
+	if d := evs[1].data(); d.str("kind") != "steer" || d.str("text") != steer || d.str("device") != "pixel-8" || d.str("client_msg_id") != "" {
+		t.Fatalf("steer's user.message %v", d)
+	}
+	if d := evs[3].data(); d.str("reason") != "interrupted_during_api_call" {
 		t.Fatalf("cancel data %v", d)
 	}
 	_, _, stops, steers, _ := fake.Snapshot()
@@ -596,26 +603,26 @@ func TestSubscribeReplay(t *testing.T) {
 	sid := fake.AddSession("api_server")
 	a.subscribe(sid)
 	a.prompt(sid)
-	a.until(isTerminal) // seq 1-2
+	a.until(isTerminal) // seq 1-3
 	fake.SetScript(sid, fakehermes.Script{Fixture: fixture(t, "tool"), FromStart: true})
 	a.prompt(sid)
-	a.until(isTerminal) // seq 3-6
+	a.until(isTerminal) // seq 4-8
 
 	b := r.connect(token)
-	b.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 2})
-	got := events(b.until(func(m msg) bool { return m.num("seq") == 6 }))
-	if kinds(got) != "tool.started tool.completed answer run.completed" {
+	b.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 3})
+	got := events(b.until(func(m msg) bool { return m.num("seq") == 8 }))
+	if kinds(got) != "user.message tool.started tool.completed answer run.completed" {
 		t.Fatalf("replay kinds %q", kinds(got))
 	}
-	checkSeqs(t, got, 3)
+	checkSeqs(t, got, 4)
 	b.quiet(100 * time.Millisecond)
 
 	c := r.connect(token)
 	c.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 0})
-	checkSeqs(t, events(c.until(func(m msg) bool { return m.num("seq") == 6 })), 1)
+	checkSeqs(t, events(c.until(func(m msg) bool { return m.num("seq") == 8 })), 1)
 
 	d := r.connect(token)
-	d.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 6})
+	d.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 8})
 	d.quiet(100 * time.Millisecond)
 
 	// Beyond the last seq (the relay's database was reset): replay_gap.
@@ -637,7 +644,7 @@ func TestSubscribeReplay(t *testing.T) {
 	r.st.SetClock(time.Now)
 	fake.SetScript(sid, fakehermes.Script{Fixture: fixture(t, "plain"), FromStart: true})
 	d.prompt(sid)
-	checkSeqs(t, events(d.until(isTerminal)), 7)
+	checkSeqs(t, events(d.until(isTerminal)), 9)
 }
 
 func TestStreamCutReattachesWithoutDuplicates(t *testing.T) {
@@ -647,13 +654,13 @@ func TestStreamCutReattachesWithoutDuplicates(t *testing.T) {
 		kinds  string
 	}{
 		{"cut, server replays from start", fakehermes.Script{CutAfter: []int{1}, FromStart: true},
-			"tool.started tool.completed reconnected answer run.completed"},
+			"user.message tool.started tool.completed reconnected answer run.completed"},
 		{"cut, server continues", fakehermes.Script{CutAfter: []int{0}},
-			"tool.started reconnected tool.completed answer run.completed"},
+			"user.message tool.started reconnected tool.completed answer run.completed"},
 		{"two cuts", fakehermes.Script{CutAfter: []int{0, 2}, FromStart: true},
-			"tool.started reconnected tool.completed answer reconnected run.completed"},
+			"user.message tool.started reconnected tool.completed answer reconnected run.completed"},
 		{"silent stream", fakehermes.Script{StallAfter: []int{1}, FromStart: true},
-			"tool.started tool.completed reconnected answer run.completed"},
+			"user.message tool.started tool.completed reconnected answer run.completed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFake(t, "tool")
@@ -663,7 +670,7 @@ func TestStreamCutReattachesWithoutDuplicates(t *testing.T) {
 			tc.script.Fixture = fixture(t, "tool")
 			if tc.name == "two cuts" {
 				// Cut between reasoning.available (dropped) and run.completed: frame 2 is reasoning.
-				tc.kinds = "tool.started reconnected tool.completed reconnected answer run.completed"
+				tc.kinds = "user.message tool.started reconnected tool.completed reconnected answer run.completed"
 			}
 			fake.SetScript(sid, tc.script)
 			a.subscribe(sid)
@@ -695,7 +702,7 @@ func TestTerminalFromRunStatus(t *testing.T) {
 	})
 	close(hold)
 	evs := events(a.until(isTerminal))
-	if kinds(evs) != "reconnected answer run.completed" || evs[1].data().str("text") != "2 + 2 is 4." {
+	if kinds(evs) != "user.message reconnected answer run.completed" || evs[2].data().str("text") != "2 + 2 is 4." {
 		t.Fatalf("got %q %v", kinds(evs), evs)
 	}
 }
@@ -718,13 +725,13 @@ func TestRelayRestartMidRun(t *testing.T) {
 		t.Fatalf("socket closed with %v on shutdown, want going away", code)
 	}
 	b := r2.connect(token)
-	b.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 2})
+	b.send(map[string]any{"type": "subscribe", "session_id": sid, "after_seq": 3})
 	close(hold)
 	after := events(b.until(isTerminal))
 	if kinds(after) != "reconnected answer run.completed" {
 		t.Fatalf("after restart %q", kinds(after))
 	}
-	checkSeqs(t, after, 3)
+	checkSeqs(t, after, 4)
 	for _, e := range after {
 		if e.str("run_id") != ack.str("run_id") {
 			t.Fatalf("wrong run %v", e)
@@ -738,7 +745,7 @@ func TestRelayRestartMidRun(t *testing.T) {
 	if _, m := b.prompt(sid); m.str("type") != "ack" {
 		t.Fatalf("prompt after restart: %v", m)
 	}
-	checkSeqs(t, events(b.until(isTerminal)), 6)
+	checkSeqs(t, events(b.until(isTerminal)), 7)
 }
 
 func TestRunForgottenByHermesFails(t *testing.T) {
@@ -754,7 +761,7 @@ func TestRunForgottenByHermesFails(t *testing.T) {
 	fake.ForgetRun(ack.str("run_id"))
 	close(hold)
 	evs := events(a.until(isTerminal))
-	if kinds(evs) != "reconnected run.failed" {
+	if kinds(evs) != "user.message reconnected run.failed" {
 		t.Fatalf("got %q", kinds(evs))
 	}
 }
@@ -771,7 +778,7 @@ func TestRunGivesUpWhenHermesStaysDown(t *testing.T) {
 	a.prompt(sid)
 	fake.Close()
 	evs := events(a.until(isTerminal))
-	if kinds(evs) != "reconnected run.failed" || evs[1].data().str("error") != "lost contact with Hermes" {
+	if kinds(evs) != "user.message reconnected run.failed" || evs[2].data().str("error") != "lost contact with Hermes" {
 		t.Fatalf("got %q %v", kinds(evs), evs)
 	}
 }

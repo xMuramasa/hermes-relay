@@ -114,7 +114,7 @@ func TestStoreFailureKeepsAnswer(t *testing.T) {
 		}
 		return false
 	}
-	if err := h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000009", sid, "what is 2+2?", nil, func(string, bool) {}); err != nil {
+	if err := h.Prompt(context.Background(), 1, "s21", "6f1c2a9e-1b7d-4c1e-9a35-000000000009", sid, "what is 2+2?", nil, func(string, bool) {}); err != nil {
 		t.Fatal(err)
 	}
 	got := rec.until(t, isRunEnd)
@@ -149,7 +149,7 @@ func TestStoreFailureKeepsAnswer(t *testing.T) {
 // A resend racing the original prompt gets the same run, never busy: here the second database read finds no row
 // but only returns once the first prompt has stored its run and left inflight (#7).
 func TestConcurrentResendSameRun(t *testing.T) {
-	h, fs, fake, _, sid := newTestHub(t)
+	h, fs, fake, rec, sid := newTestHub(t)
 	firstDone := make(chan struct{})
 	var once sync.Once
 	var lookups atomic.Int32
@@ -167,7 +167,7 @@ func TestConcurrentResendSameRun(t *testing.T) {
 	for range 2 {
 		go func() {
 			var r result
-			r.err = h.Prompt(context.Background(), 1, "6f1c2a9e-1b7d-4c1e-9a35-000000000007", sid, "what is 2+2?", nil,
+			r.err = h.Prompt(context.Background(), 1, "s21", "6f1c2a9e-1b7d-4c1e-9a35-000000000007", sid, "what is 2+2?", nil,
 				func(id string, replayed bool) { r.runID, r.replayed = id, replayed })
 			once.Do(func() { close(firstDone) })
 			results <- r
@@ -185,5 +185,18 @@ func TestConcurrentResendSameRun(t *testing.T) {
 	}
 	if creates, _, _, _, _ := fake.Snapshot(); creates != 1 {
 		t.Fatalf("Hermes got %d CreateRun calls, want 1", creates)
+	}
+	// The prompt is announced once: the resend's ack is replayed and adds no user.message (#30).
+	announced := 0
+	for _, m := range rec.until(t, isRunEnd) {
+		if m["kind"] == protocol.KindUserMessage {
+			announced++
+			if d := m["data"].(map[string]any); d["device"] != "s21" || d["text"] != "what is 2+2?" || d["kind"] != "prompt" {
+				t.Fatalf("user.message data %v", d)
+			}
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("%d user.message events, want 1", announced)
 	}
 }
