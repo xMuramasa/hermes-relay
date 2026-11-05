@@ -105,7 +105,7 @@ func TestRoles(t *testing.T) {
 	listed := func() string {
 		t.Helper()
 		code, out, _ := runCLI(t, env, "devices", "list")
-		if code != 0 || !strings.HasPrefix(out, "NAME     ROLE     PAIRED") {
+		if code != 0 || !strings.HasPrefix(out, "NAME     ROLE     TERMINAL  PAIRED") {
 			t.Fatalf("list: %d %q", code, out)
 		}
 		return strings.Join(strings.Fields(out), " ")
@@ -130,6 +130,33 @@ func TestRoles(t *testing.T) {
 	}
 	if code, _, _ := runCLI(t, env, "devices", "set-role", "macbook"); code != 2 {
 		t.Fatal("set-role without a role")
+	}
+
+	if l := listed(); !strings.Contains(l, "macbook viewer off") || !strings.Contains(l, "pixel-8 manager off") {
+		t.Fatalf("the grant must start off: %q", l)
+	}
+	if code, out, _ := runCLI(t, env, "devices", "terminal", "pixel-8", "on"); code != 0 || !strings.Contains(out, "Terminal on") {
+		t.Fatalf("terminal on: %d %q", code, out)
+	}
+	if l := listed(); !strings.Contains(l, "pixel-8 manager on") || !strings.Contains(l, "macbook viewer off") {
+		t.Fatalf("list after terminal on: %q", l)
+	}
+	if code, out, _ := runCLI(t, env, "devices", "terminal", "pixel-8", "off"); code != 0 || !strings.Contains(out, "Terminal off") {
+		t.Fatalf("terminal off: %d %q", code, out)
+	}
+	if l := listed(); !strings.Contains(l, "pixel-8 manager off") {
+		t.Fatalf("list after terminal off: %q", l)
+	}
+	if code, _, errOut := runCLI(t, env, "devices", "terminal", "macbook", "on"); code != 1 || !strings.Contains(errOut, "is a viewer") {
+		t.Fatalf("terminal on for a viewer: %d %q", code, errOut)
+	}
+	if code, _, errOut := runCLI(t, env, "devices", "terminal", "nobody", "on"); code != 1 || !strings.Contains(errOut, "no device") {
+		t.Fatalf("unknown device: %d %q", code, errOut)
+	}
+	for _, args := range [][]string{{"devices", "terminal", "macbook", "maybe"}, {"devices", "terminal", "macbook"}} {
+		if code, _, errOut := runCLI(t, env, args...); code != 2 || !strings.Contains(errOut, "terminal NAME on|off") {
+			t.Fatalf("%v: %d %q", args, code, errOut)
+		}
 	}
 }
 

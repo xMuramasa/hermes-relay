@@ -44,12 +44,13 @@ func TestBadValues(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"HERMES_URL": "ftp://x", "RELAY_ADDR": "nope", "PUBLIC_URL": "relay", "TRUSTED_PROXIES": "300.1.1.1/8", "LOG_LEVEL": "loud",
 		"AGENTS_SOCKET":  "agents.sock",
+		"TERM_SOCKET":    "term.sock",
 		"HERMES_API_KEY": "super-secret-key",
 	}))
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"HERMES_URL", "RELAY_ADDR", "PUBLIC_URL", "TRUSTED_PROXIES", "LOG_LEVEL", "AGENTS_SOCKET"} {
+	for _, want := range []string{"HERMES_URL", "RELAY_ADDR", "PUBLIC_URL", "TRUSTED_PROXIES", "LOG_LEVEL", "AGENTS_SOCKET", "TERM_SOCKET"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s: %v", want, err)
 		}

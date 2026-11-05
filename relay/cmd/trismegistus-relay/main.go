@@ -37,7 +37,8 @@ Usage:
                      [--role manager|viewer]      (default viewer: chat only, no management)
   trismegistus-relay devices list                 list paired devices
   trismegistus-relay devices set-role NAME ROLE   make a device a manager or a viewer
-  trismegistus-relay devices revoke NAME          revoke a device (its sockets close at once)
+  trismegistus-relay devices terminal NAME on|off grant a device the terminal, or take it away (its shells end)
+  trismegistus-relay devices revoke NAME          revoke a device (its sockets close at once, its shells end)
   trismegistus-relay healthcheck                  GET /healthz on RELAY_ADDR; exit 0 if healthy
   trismegistus-relay version                      print the version
 
@@ -53,6 +54,7 @@ Environment:
   GITHUB_OWNER     owner whose repos the relay may reach (required with GITHUB_TOKEN)
   GITHUB_PROJECT   the board's ProjectV2 node id, PVT_... (required with GITHUB_TOKEN)
   AGENTS_SOCKET    Unix socket of the host helper trismegistus-agents, for /api/agents (optional)
+  TERM_SOCKET      Unix socket of the host helper trismegistus-term, for /api/terminal (optional)
 `
 
 func main() {
@@ -136,6 +138,7 @@ func serve(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) int
 	if cfg.AgentsSocket != "" {
 		srv.SetAgents(agents.New(cfg.AgentsSocket))
 	}
+	srv.SetTerminal(cfg.TermSocket)
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		log.Error("listen failed", "addr", cfg.Addr, "err", err.Error())
@@ -226,7 +229,7 @@ func pair(ctx context.Context, cfg config.Config, args []string, stdout, stderr 
 	return 0
 }
 
-const devicesUsage = "devices: use 'devices list', 'devices set-role NAME manager|viewer' or 'devices revoke NAME'\n"
+const devicesUsage = "devices: use 'devices list', 'devices set-role NAME manager|viewer', 'devices terminal NAME on|off' or 'devices revoke NAME'\n"
 
 func devices(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -247,13 +250,17 @@ func devices(ctx context.Context, cfg config.Config, args []string, stdout, stde
 			return 1
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tROLE\tPAIRED\tLAST SEEN")
+		fmt.Fprintln(tw, "NAME\tROLE\tTERMINAL\tPAIRED\tLAST SEEN")
 		for _, d := range list {
 			seen := "never"
 			if !d.LastSeenAt.IsZero() {
 				seen = d.LastSeenAt.Local().Format(time.DateTime)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Role, d.CreatedAt.Local().Format(time.DateTime), seen)
+			terminal := "off"
+			if d.Terminal {
+				terminal = "on"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", d.Name, d.Role, terminal, d.CreatedAt.Local().Format(time.DateTime), seen)
 		}
 		_ = tw.Flush()
 		return 0
@@ -271,6 +278,23 @@ func devices(ctx context.Context, cfg config.Config, args []string, stdout, stde
 		}
 		fmt.Fprintf(stdout, "%q is now a %s. It applies to its next request.\n", args[1], args[2])
 		return 0
+	case args[0] == "terminal" && len(args) == 3 && (args[2] == "on" || args[2] == "off"):
+		if err := st.SetDeviceTerminal(ctx, args[1], args[2] == "on"); errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(stderr, "devices: no device named %q\n", args[1])
+			return 1
+		} else if errors.Is(err, store.ErrNotManager) {
+			fmt.Fprintf(stderr, "devices: %q is a viewer; make it a manager first (devices set-role %s manager)\n", args[1], args[1])
+			return 1
+		} else if err != nil {
+			fmt.Fprintf(stderr, "devices: %v\n", err)
+			return 1
+		}
+		if args[2] == "on" {
+			fmt.Fprintf(stdout, "Terminal on for %q: as a manager it can open a shell on this host.\n", args[1])
+		} else {
+			fmt.Fprintf(stdout, "Terminal off for %q. Its open terminals close within seconds.\n", args[1])
+		}
+		return 0
 	case args[0] == "revoke" && len(args) == 2:
 		if err := st.RevokeDevice(ctx, args[1]); errors.Is(err, store.ErrNotFound) {
 			fmt.Fprintf(stderr, "devices: no device named %q\n", args[1])
@@ -279,7 +303,7 @@ func devices(ctx context.Context, cfg config.Config, args []string, stdout, stde
 			fmt.Fprintf(stderr, "devices: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "Revoked %q. Its sockets close within seconds.\n", args[1])
+		fmt.Fprintf(stdout, "Revoked %q. Its sockets and terminals close within seconds.\n", args[1])
 		return 0
 	default:
 		fmt.Fprint(stderr, devicesUsage)

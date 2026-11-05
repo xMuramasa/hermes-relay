@@ -421,3 +421,78 @@ func TestMigrationToLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A database from before the terminal grant (version 5) keeps its devices, with the grant off.
+func TestMigrationToTerminal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{migrations[0], migrations[1], migrations[2], migrations[3], migrations[4], `PRAGMA user_version = 5`,
+		`INSERT INTO devices (name, token_hash, created_at, role) VALUES ('macbook', x'0102', 1, 'manager')`,
+		`INSERT INTO devices (name, token_hash, created_at, role) VALUES ('s21', x'0304', 1, 'viewer')`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if v, _ := s.Version(); v != len(migrations) {
+		t.Fatalf("version %d", v)
+	}
+	list, err := s.ListDevices(ctx)
+	if err != nil || len(list) != 2 || list[0].Terminal || list[1].Terminal {
+		t.Fatalf("devices: %+v %v", list, err)
+	}
+	allowed := func() map[int64]bool {
+		t.Helper()
+		ids, err := s.TerminalDevices(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	if ids := allowed(); len(ids) != 0 {
+		t.Fatalf("no grant yet: %v", ids)
+	}
+	if err := s.SetDeviceTerminal(ctx, "macbook", true); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.DeviceByTokenHash(ctx, []byte{1, 2}); err != nil || !d.Terminal {
+		t.Fatalf("%+v %v", d, err)
+	}
+	if ids := allowed(); !ids[list[0].ID] || len(ids) != 1 {
+		t.Fatalf("granted manager: %v", ids)
+	}
+	if err := s.SetDeviceTerminal(ctx, "s21", true); !errors.Is(err, ErrNotManager) {
+		t.Fatalf("a viewer can't get the grant: %v", err)
+	}
+	if err := s.SetDeviceTerminal(ctx, "s21", false); err != nil {
+		t.Fatalf("off works on a viewer: %v", err)
+	}
+	if ids := allowed(); len(ids) != 1 {
+		t.Fatalf("a viewer with the grant: %v", ids)
+	}
+	if err := s.SetDeviceRole(ctx, "macbook", RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	if ids := allowed(); len(ids) != 0 {
+		t.Fatalf("demoted: %v", ids)
+	}
+	// Promoted again, the grant doesn't come back by itself.
+	if err := s.SetDeviceRole(ctx, "macbook", RoleManager); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.DeviceByTokenHash(ctx, []byte{1, 2}); err != nil || d.Terminal {
+		t.Fatalf("a demotion drops the grant: %+v %v", d, err)
+	}
+	if err := s.SetDeviceTerminal(ctx, "nobody", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown device: %v", err)
+	}
+}

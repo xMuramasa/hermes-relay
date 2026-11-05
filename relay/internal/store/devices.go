@@ -22,6 +22,7 @@ type Device struct {
 	ID         int64
 	Name       string
 	Role       string
+	Terminal   bool // the grant; a terminal also needs the manager role
 	CreatedAt  time.Time
 	LastSeenAt time.Time // zero if never seen
 }
@@ -135,8 +136,8 @@ func (s *Store) DeviceByTokenHash(ctx context.Context, tokenHash []byte) (Device
 	var created int64
 	var seen sql.NullInt64
 	var stored []byte
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, role, token_hash, created_at, last_seen_at FROM devices WHERE token_hash = ?`,
-		tokenHash).Scan(&d.ID, &d.Name, &d.Role, &stored, &created, &seen)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, role, terminal, token_hash, created_at, last_seen_at FROM devices WHERE token_hash = ?`,
+		tokenHash).Scan(&d.ID, &d.Name, &d.Role, &d.Terminal, &stored, &created, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrNotFound
 	} else if err != nil {
@@ -159,7 +160,7 @@ func (s *Store) TouchDevice(ctx context.Context, id int64) error {
 
 // ListDevices returns all devices by name.
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, role, created_at, last_seen_at FROM devices ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, role, terminal, created_at, last_seen_at FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +170,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		var created int64
 		var seen sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.Name, &d.Role, &created, &seen); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Role, &d.Terminal, &created, &seen); err != nil {
 			return nil, err
 		}
 		d.CreatedAt, d.LastSeenAt = time.UnixMilli(created), msTime(seen)
@@ -180,7 +181,17 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 
 // DeviceIDs returns the ids of all current devices (the server uses it to drop revoked devices' sockets).
 func (s *Store) DeviceIDs(ctx context.Context) (map[int64]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM devices`)
+	return s.deviceIDs(ctx, `SELECT id FROM devices`)
+}
+
+// TerminalDevices returns the ids of the devices allowed a terminal now: managers with the grant (the server uses it
+// to close the terminals of devices revoked, demoted or without the grant).
+func (s *Store) TerminalDevices(ctx context.Context) (map[int64]bool, error) {
+	return s.deviceIDs(ctx, `SELECT id FROM devices WHERE terminal = 1 AND role = 'manager'`)
+}
+
+func (s *Store) deviceIDs(ctx context.Context, query string) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -208,12 +219,32 @@ func (s *Store) RevokeDevice(ctx context.Context, name string) error {
 	return nil
 }
 
+// SetDeviceTerminal turns a device's terminal grant on or off by name. The server closes open terminals at its next check.
+func (s *Store) SetDeviceTerminal(ctx context.Context, name string, on bool) error {
+	// Only a manager gets the grant (ErrNotManager for a viewer): a shell is never a dormant right waiting for a
+	// promotion. Turning it off works on any device.
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET terminal = ? WHERE name = ? AND (? = 0 OR role = 'manager')`, on, name, on)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var role string
+		if err := s.db.QueryRowContext(ctx, `SELECT role FROM devices WHERE name = ?`, name).Scan(&role); err != nil {
+			return ErrNotFound
+		}
+		return ErrNotManager
+	}
+	return nil
+}
+
 // SetDeviceRole changes a device's role by name. It applies to the device's next request.
 func (s *Store) SetDeviceRole(ctx context.Context, name, role string) error {
 	if !ValidRole(role) {
 		return ErrInvalidRole
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET role = ? WHERE name = ?`, role, name)
+	// A demotion also drops the terminal grant: promoted again, the device needs a new `devices terminal NAME on`.
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE devices SET role = ?, terminal = CASE WHEN ? = 'manager' THEN terminal ELSE 0 END WHERE name = ?`, role, role, name)
 	if err != nil {
 		return err
 	}
