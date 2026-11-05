@@ -74,9 +74,12 @@ type Server struct {
 	modelCache               modelCache
 	media                    mediaCache
 
+	termSocket string // empty: /api/terminal answers not_configured
+
 	mu      sync.Mutex
 	closing bool
 	conns   map[int64][]*wsConn // by device id, oldest first
+	terms   map[*wsConn]bool    // open /api/terminal sockets
 }
 
 // New makes a server.
@@ -91,6 +94,7 @@ func New(opts Options, st *store.Store, h *hub.Hub, hc *hermes.Client, log *slog
 		pairAll: newLimiter(opts.PairPerMinuteGlobal, time.Minute),
 		prompts: newLimiter(opts.PromptsPerMinute, time.Minute),
 		conns:   map[int64][]*wsConn{},
+		terms:   map[*wsConn]bool{},
 	}, nil
 }
 
@@ -144,13 +148,14 @@ func (s *Server) Handler() http.Handler {
 	// Images on the host named in a session's messages (media.go, #26), through the agents helper.
 	mux.HandleFunc("GET /api/sessions/{id}/media", s.logged(s.authed(s.sessionMedia)))
 	mux.HandleFunc("GET /ws", s.handleWS)
+	mux.HandleFunc("GET /api/terminal", s.handleTerminal) // terminal.go, #31
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, protocol.Errorf(protocol.CodeNotFound, "not found"), 0)
 	})
 	return mux
 }
 
-// Run does the background work (dropping revoked devices' sockets, hourly cleanup) until ctx is done.
+// Run does the background work (dropping revoked devices' sockets and terminals, hourly cleanup) until ctx is done.
 func (s *Server) Run(ctx context.Context) {
 	revoke := time.NewTicker(s.opts.RevokeCheck)
 	defer revoke.Stop()
@@ -163,6 +168,7 @@ func (s *Server) Run(ctx context.Context) {
 			return
 		case <-revoke.C:
 			s.dropRevoked(ctx)
+			s.dropTerminals(ctx)
 		case <-cleanup.C:
 			s.cleanup(ctx)
 		}
@@ -207,6 +213,9 @@ func (s *Server) CloseSockets() {
 	var all []*wsConn
 	for _, cs := range s.conns {
 		all = append(all, cs...)
+	}
+	for w := range s.terms {
+		all = append(all, w)
 	}
 	s.mu.Unlock()
 	for _, c := range all {

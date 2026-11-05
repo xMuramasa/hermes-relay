@@ -93,7 +93,7 @@ Limits:
   `modernc.org/sqlite` (pure-Go SQLite, no cgo), a QR-to-terminal package. Everything else is the standard library
   (`net/http`, `log/slog` JSON logs, `encoding/json`). Pinned in `go.mod`/`go.sum`.
 - One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
-  [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
+  [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices terminal <name> on|off`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log,
   session tags, handoff links, per-session model choices and image attachments (files in `/data/attachments/`).
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
@@ -107,7 +107,8 @@ Limits:
   Only that one variable: the rest of Hermes' `.env` never enters the container. GitHub (optional, see GitHub
   below): `GITHUB_TOKEN` (in the same `.env`, added by Martin), `GITHUB_OWNER` (`xMuramasa`), `GITHUB_PROJECT` (the
   Work board's node id, `PVT_…`). No token: the GitHub endpoints answer `not_configured`; a token without a valid
-  owner or a `PVT_` project stops `serve` at start.
+  owner or a `PVT_` project stops `serve` at start. Terminal (optional, see Terminal below): `TERM_SOCKET`, an
+  absolute path; empty, `/api/terminal` answers `not_configured`.
 
 ### Pairing and devices
 
@@ -117,8 +118,8 @@ Limits:
   old device.
 - The app scans it (the Mac app takes the pasted code) and trades the code for a device token (`trs_` + base64url of 32 random
   bytes). The relay stores only its SHA-256, plus the name, creation time and last-seen time.
-- `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once (the server checks every 2 s,
-  since the CLI runs as another process on the same database).
+- `devices list` and `devices revoke <name>`. A revoked phone is disconnected at once and its terminals close, which
+  ends their shells (the server checks every 2 s, since the CLI runs as another process on the same database).
 - The token never appears in chat, logs or the repo.
 - Every device has a role: `viewer` (the default, and what devices paired before roles became) or `manager`.
   `pair --name mac --role manager` pairs a manager; `devices set-role <name> manager|viewer` changes a paired
@@ -127,6 +128,10 @@ Limits:
   GitHub actions, stopping background agents; for the Mac app) are manager-only and answer viewers `403
   {"error": {"code": "forbidden", ...}}`. Roles are REST-only: the WebSocket messages (including `ready`) and
   `protocol/schema.json` don't carry them, since the Mac app decodes `ready` strictly.
+- Every device has a terminal grant, off by default (also for devices paired before it, a new pairing and a
+  `pair --replace`). `devices terminal <name> on|off` sets it and `devices list` shows it in its `TERMINAL` column; off
+  closes that device's open terminals within 2 s. Only a manager gets the grant (`on` for a viewer is refused), and a
+  demotion to viewer drops it and closes its terminals: promoted again, the device needs `devices terminal <name> on`.
 
 ### REST (device token as Bearer)
 
@@ -325,6 +330,38 @@ helper does the work and the relay passes its JSON on.
   first bytes match it (`http.DetectContentType`); at most 10 MiB. 200 with `Content-Type` and `Cache-Control:
   private, max-age=3600`, else 404.
 
+### Terminal (WebSocket, for the Mac app; added 2026-11-04)
+
+The Mac app's terminal drawer is a shell on optiplex as `muramasa`, streamed over the relay; the app keeps its sandbox.
+The relay's container can't start host processes, so the host helper `trismegistus-term` (`term/`, a user unit) owns the
+shells: one connection on its Unix socket is one shell. The socket is `~/.local/state/trismegistus-term/term.sock`,
+directory 0750 and socket 0660 (the container joins gid 1000 with `group_add`); those modes are the security boundary.
+The helper's stream, limits and environment are in `term/README.md`. It holds at most 4 shells, and a closed connection
+ends its shell: SIGHUP to the shell's session, SIGKILL to what is left after 5 s. A process that starts its own session
+(tmux, a daemon) outlives that; stopping the unit ends those too.
+
+`GET /api/terminal` (schema: `protocol/terminal.schema.json`):
+
+1. Within 5 s of connecting the app sends `auth {token}`, as on `/ws`, then `open {cols, rows}` (each 1-1000) within
+   another 5 s.
+2. The relay answers `opened {host, shell}`, or `error {code, message}` and closes (1008). Codes: `unauthorized`,
+   `forbidden` (a viewer, or a device without the grant; the message names `devices terminal NAME on`), `not_configured`
+   (no `TERM_SOCKET`), `unavailable` (the helper isn't running or couldn't start a shell), `busy` (4 shells are open) and
+   `bad_request` (not a valid `open`).
+3. After that, binary frames carry PTY bytes both ways. Text frames carry app → relay `resize {cols, rows}` and relay →
+   app `exit {status}` (128 + the signal for a killed shell), after which the socket closes (1000). A bad `resize` gets
+   `error bad_request` and the terminal stays open.
+
+- Only managers holding the grant are allowed. The check runs when the terminal opens and again every 2 s while it is
+  open, so `devices terminal NAME off`, `devices revoke NAME` and `devices set-role NAME viewer` close it (1008), which
+  ends the shell.
+- Frames are at most 32 KiB; a bigger one closes the socket (1009). Nothing is queued in either direction: a slow app
+  slows the shell, and a shell that stops reading stops the app's socket. The relay pings as on `/ws`, and two missed
+  pongs close the terminal. That also means input stalled for about 50 s on a program that isn't reading drops the
+  terminal, since the pongs wait behind it.
+- `/ws`'s limit of 3 sockets per device doesn't count terminals. A relay restart closes them (1001) and their shells end.
+- Each open and close is logged with the device, duration and exit status, never the content.
+
 ### WebSocket `/ws`
 
 Messages are JSON objects with a `type` field, defined in `protocol/schema.json`.
@@ -418,6 +455,9 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 - LAN and tailnet only (no public DNS), TLS from Caddy.
 - A paired, unlocked phone can approve commands that run on optiplex. No fingerprint check for now (one user); the
   approval prompt is the only gate. A biometric check can be added later.
+- A device with the terminal grant has a shell on optiplex as Martin. The grant is per device and off by default;
+  `devices terminal NAME off`, `devices revoke NAME` or a demotion to viewer ends that device's shells within 2 s;
+  `systemctl --user stop trismegistus-term` ends all of them.
 - Push notifications to Android devices (#28, through the homelab's ntfy, no Firebase) carry no content: one word,
   `approval` or `run`; the app fetches the details over its own socket.
 

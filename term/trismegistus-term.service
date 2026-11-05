@@ -1,0 +1,15 @@
+[Unit]
+Description=Trismegistus terminal helper (the shells behind the Mac app's terminal drawer)
+
+[Service]
+ExecStart=%h/.local/bin/trismegistus-term
+Restart=on-failure
+RestartSec=5
+# Stopping the unit is the host's kill switch: SendSIGHUP reaches shells that ignore SIGTERM at once, the helper ends
+# what is left (SIGKILL after 5 s), and systemd then kills the control group, daemons a shell left behind included.
+SendSIGHUP=yes
+TimeoutStopSec=8
+# No NoNewPrivileges: it would pass to the shells and break sudo in them.
+
+[Install]
+WantedBy=default.target

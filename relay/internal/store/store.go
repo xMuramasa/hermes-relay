@@ -100,6 +100,8 @@ var migrations = []string{
 		PRIMARY KEY (run_id, idx)
 	);
 	CREATE INDEX run_attachments_attachment ON run_attachments(attachment_id);`,
+	// Terminal grant (#31): off for every device until `devices terminal NAME on`.
+	`ALTER TABLE devices ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.
@@ -168,6 +170,7 @@ var (
 	ErrTooManyDevices = errors.New("device limit reached")
 	ErrInvalidCode    = errors.New("invalid, used or expired pairing code")
 	ErrInvalidRole    = errors.New("role must be manager or viewer")
+	ErrNotManager     = errors.New("the device is a viewer")
 )
 
 // Retention is how long events, finished runs and used codes are kept.

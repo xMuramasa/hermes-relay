@@ -27,6 +27,8 @@ type Config struct {
 	GitHubProject string // the Work board's node id (PVT_...)
 	// Background agents (optional): the host helper's socket; empty and the /api/agents endpoints answer not_configured.
 	AgentsSocket string
+	// Terminal (optional): the host helper's socket; empty and /api/terminal answers not_configured.
+	TermSocket string
 }
 
 // DBPath is the SQLite file inside DataDir.
@@ -62,6 +64,7 @@ func Load(getenv func(string) string) (Config, error) {
 		GitHubOwner:   get("GITHUB_OWNER", ""),
 		GitHubProject: get("GITHUB_PROJECT", ""),
 		AgentsSocket:  get("AGENTS_SOCKET", ""),
+		TermSocket:    get("TERM_SOCKET", ""),
 	}
 	var errs []error
 	if u, err := url.Parse(c.HermesURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -93,6 +96,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.AgentsSocket != "" && !filepath.IsAbs(c.AgentsSocket) {
 		errs = append(errs, errors.New("AGENTS_SOCKET must be an absolute path"))
+	}
+	if c.TermSocket != "" && !filepath.IsAbs(c.TermSocket) {
+		errs = append(errs, errors.New("TERM_SOCKET must be an absolute path"))
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":

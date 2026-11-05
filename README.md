@@ -31,6 +31,9 @@ code is at the tag `expo-archive`.
   - `internal/pairing`: tokens, pairing codes, the QR code.
   - `internal/fakehermes`: the fake Hermes the tests run against (replays `probe/fixtures/`).
   - `Dockerfile`: build context `relay/`.
+- `agents/`: the host helper behind `/api/agents` (its own module and README).
+- `term/`: the host helper behind `/api/terminal`, which owns the shells of the Mac app's terminal drawer (its own
+  module and README).
 
 ## Protocol
 
@@ -87,6 +90,7 @@ live in the homelab repo.
 | `DATA_DIR` | `/data` | holds `relay.db` (SQLite, WAL) |
 | `TRUSTED_PROXIES` | `127.0.0.1/32,172.16.0.0/12` | peers whose `X-Forwarded-For` is honored (rate limits) |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `TERM_SOCKET` | (none) | the host helper `trismegistus-term`'s socket, an absolute path; empty and `/api/terminal` answers `not_configured` |
 
 ### Commands
 
@@ -94,7 +98,8 @@ live in the homelab repo.
 trismegistus-relay [serve]                       # run the relay (default)
 trismegistus-relay pair --name pixel-8 [--replace]  # QR + code for a new device (10 min, single use)
 trismegistus-relay devices list
-trismegistus-relay devices revoke pixel-8        # its sockets close within ~2 s
+trismegistus-relay devices terminal macbook on   # or off: its terminals close within ~2 s
+trismegistus-relay devices revoke pixel-8        # its sockets and terminals close within ~2 s
 trismegistus-relay healthcheck                   # exit 0 if GET /healthz on RELAY_ADDR is ok
 trismegistus-relay version
 ```

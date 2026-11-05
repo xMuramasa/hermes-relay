@@ -78,6 +78,31 @@ A turn starts with `user.message` (kind `prompt`) and ends with `answer` + `run.
 `busy` (a run is active: offer to steer instead), `not_found`, `read_only` (session owned by Telegram/CLI/...),
 `replay_gap`, `hermes_unavailable` (try again later), `hermes_error`, `internal`.
 
+## Terminal (`/api/terminal`, Mac app)
+
+A socket of its own, with its own schema: `terminal.schema.json` covers the text frames (the relay's tests check each
+one they receive against it). Binary frames carry PTY bytes both ways, at most 32 KiB; a bigger one closes the socket
+(1009).
+
+1. Open `wss://<relay>/api/terminal`. Send `{"type":"auth","token":"trs_..."}` within 5 s, then
+   `{"type":"open","cols":80,"rows":24}` (1-1000 each) within another 5 s.
+2. The relay answers `{"type":"opened","host":"optiplex","shell":"/bin/bash"}`, or `error {code, message}` and closes
+   (1008).
+3. After that, send binary input and `resize {cols, rows}`; read binary output and `exit {status}`, after which the
+   socket closes (1000). Closing the socket ends the shell.
+
+| code | meaning |
+|---|---|
+| `unauthorized` | bad token, or the first message wasn't `auth` |
+| `forbidden` | a viewer, or a device without the grant; `message` names `devices terminal NAME on` |
+| `not_configured` | the relay has no `TERM_SOCKET` |
+| `unavailable` | the host helper isn't running, or couldn't start a shell |
+| `busy` | 4 shells are open on the host |
+| `bad_request` | not a valid `open` (closes), or a bad `resize` (the terminal stays open) |
+
+An open terminal closes with 1008 within 2 s of `devices terminal NAME off`, `devices revoke NAME` or a demotion to
+viewer, with 1001 when the relay restarts or the helper stops. See SPEC.md, "Terminal".
+
 ## REST (Bearer device token)
 
 `GET /api/sessions`, `POST /api/sessions` (no body; creates an untitled session), `GET /api/sessions/{id}`,
