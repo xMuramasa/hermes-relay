@@ -33,11 +33,14 @@ func main() {
 	runs := flag.String("runs", filepath.Join(home, ".local", "state", "hermes-runs")+","+
 		filepath.Join(home, ".hermes", "cache", "scratch", "tmac", "wt"),
 		"comma-separated directories of Claude Code delegate runs (the first wins; the second is the old scratch folder)")
+	hermes := flag.String("hermes", filepath.Join(home, ".local", "bin", "hermes"), "the hermes command (asked for its Python by rewinds)")
+	hermesHome := flag.String("hermes-home", filepath.Join(home, ".hermes"), "HERMES_HOME for rewinds")
+	hermesAgent := flag.String("hermes-agent", filepath.Join(home, ".hermes", "hermes-agent"), "Hermes' code, imported by rewinds")
 	flag.Parse()
 
 	h := &Helper{Processes: *procs, Runs: strings.Split(*runs, ","), Proc: "/proc", Home: home, Grace: 10 * time.Second, Now: time.Now, Log: log,
 		StopUnit:    func(unit string) error { return exec.Command("systemctl", "--user", "stop", unit).Run() },
-		ActiveUnits: activeUnits}
+		ActiveUnits: activeUnits, Hermes: *hermes, HermesHome: *hermesHome, HermesAgent: *hermesAgent, RewindTimeout: 20 * time.Second}
 	ln, err := listen(*sock)
 	if err != nil {
 		log.Error("listen failed", "socket", *sock, "err", err.Error())

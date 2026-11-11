@@ -342,6 +342,18 @@ helper does the work and the relay passes its JSON on.
   starting with `.` except under `~/.hermes/cache/`; a regular file with extension png, jpg, jpeg, gif or webp whose
   first bytes match it (`http.DetectContentType`); at most 10 MiB. 200 with `Content-Type` and `Cache-Control:
   private, max-age=3600`, else 404.
+- The helper also rewinds conversations for `prompt.rewind_to` (#33; see WebSocket): `POST /sessions/:id/rewind
+  {"before_message_id": n}`. The session id must match `^[A-Za-z0-9_.:-]{1,128}$` and `n` be a positive integer, else
+  400 before anything runs. It runs Hermes' own `SessionDB.rewind_user_turn` (soft-deletes, `active=0`, every row from
+  that user turn on; Hermes' message list and each run's history load see active rows only) with Hermes' interpreter:
+  element 0 of `hermes --print-runtime-command` (`-hermes`, default `~/.local/bin/hermes`; asked every time, the path
+  moves with Hermes updates), as `<python> -I -c <bootstrap + rewind.py> <id> <n>` (argv, no shell; the bootstrap puts
+  `-hermes-agent`, default `~/.hermes/hermes-agent`, on `sys.path` and imports `hermes_bootstrap`), with `HERMES_HOME`
+  (`-hermes-home`, default `~/.hermes`), 20 s at most. The script finds `n` among the user entries of
+  `get_messages_as_conversation(id, include_row_ids=True, repair_alternation=True)` (its index there is the user
+  ordinal) and prints only counts. Answers: 200 `{"rewound", "turns"}` (rows soft-deleted, user turns undone); 404
+  `not_a_user_message`; 502 `rewind_failed` with a short reason (the script's last stderr line, ≤ 200 characters, or
+  `timed out`).
 
 ### Terminal (WebSocket, for the Mac app; added 2026-11-04)
 
@@ -380,9 +392,10 @@ ends its shell: SIGHUP to the shell's session, SIGKILL to what is left after 5 s
 Messages are JSON objects with a `type` field, defined in `protocol/schema.json`.
 
 - Phone → relay: `auth {token}` (must be the first message, within 5 s), `subscribe {session_id, after_seq?}`,
-  `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text, attachments?}` (`attachments`: 1-4 unique
-  upload ids; `text` may be `""` only with at least one; an unknown id is `bad_request` "unknown attachment", more than
-  7 MiB of images in one prompt `too_large`; steers stay text only), `stop {run_id}`, `steer {run_id, text}`,
+  `unsubscribe {session_id}`, `prompt {client_msg_id, session_id, text, attachments?, rewind_to?}` (`attachments`: 1-4
+  unique upload ids; `text` may be `""` only with at least one; an unknown id is `bad_request` "unknown attachment",
+  more than 7 MiB of images in one prompt `too_large`; steers stay text only; `rewind_to`: see Rewind below),
+  `stop {run_id}`, `steer {run_id, text}`,
   `approve {run_id, request_id, choice: once|session|deny}`, `ping`.
 - Relay → phone: `ready {device, server_version}`, `event {session_id, run_id, seq, kind, data, ts}` (`ts` in unix
   ms), `run {run_id, session_id, status}` (`running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`; live
@@ -419,6 +432,19 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 - `client_msg_id` (a UUID) becomes Hermes' `Idempotency-Key`, so a double tap or a resend after reconnecting can't
   start two turns.
 - One run at a time per session. A prompt during a run gets `error busy`; the app offers to send it as a steer.
+- Rewind (#33, the Mac app's retry and edit): Hermes' API can't cut a conversation, so `prompt.rewind_to` (an integer
+  ≥ 1: the Hermes message id of one of the session's user messages, as `GET /api/sessions/:id/messages` gives it) first
+  rewinds the conversation to just before that message, then starts the run as any prompt (same text, attachments and
+  model). Retry resends the last user message's text with its own id; edit sends the changed text. The rewind runs
+  after the replay check (a resend of the same `client_msg_id` is acked as replayed and rewinds nothing) and under the
+  session's start lock (a run active or starting is `busy` before anything is rewound), so no other prompt lands in
+  between. The agents helper does it (`POST /sessions/:id/rewind`, see Background agents). Errors (`ref` is the
+  `client_msg_id`): the id is not one of the session's user messages → `not_found`; the helper not set up
+  (`AGENTS_SOCKET`) or not running → `hermes_unavailable` "the agents helper isn't running"; any other failure →
+  `hermes_error`. A rewind that worked stays when the run then fails to start; the error comes back as for any prompt
+  and the app keeps the text, so its resend is a plain prompt. There is no event for a rewind (both apps refuse
+  unknown kinds): the sender reloads the history itself, and other devices pick the rewind up on their next history
+  load (when the new run ends). Logs carry the session id, the message id and the counts, never the text.
 - Keepalive: the relay pings every 25 s and drops the socket after two missed pongs. Runs never depend on a socket
   being open.
 - Relay restart: runs that were in progress are found again (`GET /v1/runs/{id}`) and re-attached or polled to their

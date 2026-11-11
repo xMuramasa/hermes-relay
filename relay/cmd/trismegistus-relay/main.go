@@ -136,7 +136,9 @@ func serve(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) int
 		srv.SetGitHub(github.New(config.DefaultGitHubAPIURL, cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubProject))
 	}
 	if cfg.AgentsSocket != "" {
-		srv.SetAgents(agents.New(cfg.AgentsSocket))
+		ac := agents.New(cfg.AgentsSocket)
+		srv.SetAgents(ac)
+		h.SetAgents(ac)
 	}
 	srv.SetTerminal(cfg.TermSocket)
 	ln, err := net.Listen("tcp", cfg.Addr)

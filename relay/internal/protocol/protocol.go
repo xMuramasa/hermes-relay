@@ -131,6 +131,7 @@ type Inbound struct {
 	RequestID   string   `json:"request_id,omitempty"`
 	Choice      string   `json:"choice,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	RewindTo    int64    `json:"rewind_to,omitempty"`
 }
 
 // Outbound messages (relay → phone).
