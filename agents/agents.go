@@ -37,7 +37,8 @@ var (
 // Helper answers for the background work Hermes knows about. It reads only processes.json, /proc/<pid>/stat, the
 // stream, progress, result and run.json files of delegate runs in Runs, which dispatch-<name>.service units are
 // active (systemctl --user list-units), and images /media is asked for (media.go: under Home, by strict rules);
-// never environment variables or other files. Rewinds run Hermes' own code in its interpreter (rewind.go).
+// never environment variables or other files. Rewinds and searches run Hermes' own code in its interpreter (rewind.go,
+// search.go).
 type Helper struct {
 	Processes   string                  // Hermes' processes.json
 	Runs        []string                // directories of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...); the first wins
@@ -53,6 +54,9 @@ type Helper struct {
 	HermesHome    string        // HERMES_HOME for it
 	HermesAgent   string        // Hermes' code, put on the interpreter's sys.path
 	RewindTimeout time.Duration // the whole rewind
+	SearchTimeout time.Duration // the whole search (search.go)
+
+	searches chan struct{} // search slots, made by Handler
 }
 
 // Agent is one piece of background work as the app sees it.
@@ -501,11 +505,13 @@ func (h *Helper) kill(pid, start int64) {
 }
 
 // Handler serves GET /agents, GET /agents/{id}/transcript?after=N, POST /agents/{id}/stop, GET /media?path=… and
-// POST /sessions/{id}/rewind.
+// POST /sessions/{id}/rewind and GET /search?q=…&limit=n.
 func (h *Helper) Handler() http.Handler {
+	h.searches = make(chan struct{}, maxSearches)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /media", h.serveMedia)
 	mux.HandleFunc("POST /sessions/{id}/rewind", h.serveRewind)
+	mux.HandleFunc("GET /search", h.serveSearch)
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		list, err := h.List()
 		if err != nil {

@@ -26,7 +26,7 @@ func New(socket string) *Client {
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
-	// slow is for rewinds: the helper gives Hermes' interpreter up to 20 s.
+	// slow is for rewinds and searches: the helper gives Hermes' interpreter up to 20 s.
 	return &Client{hc: &http.Client{Timeout: 10 * time.Second, Transport: tr}, slow: &http.Client{Timeout: 25 * time.Second, Transport: tr}}
 }
 
@@ -45,6 +45,13 @@ func (c *Client) Do(ctx context.Context, method, path string, q url.Values) (int
 func (c *Client) Rewind(ctx context.Context, sessionID string, before int64) (int, []byte, error) {
 	body := strings.NewReader(`{"before_message_id": ` + strconv.FormatInt(before, 10) + "}")
 	st, _, b, err := c.send(ctx, c.slow, http.MethodPost, "/sessions/"+sessionID+"/rewind", nil, body, maxBody)
+	return st, b, err
+}
+
+// Search asks the helper to search Hermes' messages (GET /search?q=…&limit=n) and returns its status and body. The
+// helper gives Hermes' interpreter up to 10 s and may first wait for a free slot.
+func (c *Client) Search(ctx context.Context, q string, limit int) (int, []byte, error) {
+	st, _, b, err := c.send(ctx, c.slow, http.MethodGet, "/search", url.Values{"q": {q}, "limit": {strconv.Itoa(limit)}}, nil, maxBody)
 	return st, b, err
 }
 

@@ -65,42 +65,56 @@ func (h *Helper) serveRewind(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rewind asks Hermes for its interpreter (it moves with Hermes updates, so every time) and runs rewind.py in it.
-// Error messages are short and never carry message text: the script prints none.
+// rewind runs rewind.py. Error messages are short and never carry message text: the script prints none.
 func (h *Helper) rewind(ctx context.Context, sid string, before int64) (rewound, error) {
+	line, code, err := h.python(ctx, rewindScript, sid, strconv.FormatInt(before, 10))
+	if code == exitNotUserMessage {
+		return rewound{}, errNotUserMessage
+	}
+	if err != nil {
+		return rewound{}, err
+	}
+	var out rewound
+	if err := json.Unmarshal([]byte(line), &out); err != nil {
+		return rewound{}, errors.New("the rewind script printed no result")
+	}
+	return out, nil
+}
+
+// python asks Hermes for its interpreter (it moves with Hermes updates, so every time) and runs script in it after
+// hermes_bootstrap, with args as argv (no shell). It returns the script's last stdout line and, when it exited
+// non-zero, its exit code; an error is "timed out" or short (the script's last stderr line).
+func (h *Helper) python(ctx context.Context, script string, args ...string) (string, int, error) {
 	env := append(os.Environ(), "HERMES_HOME="+h.HermesHome)
 	rt := exec.CommandContext(ctx, h.Hermes, "--print-runtime-command")
 	rt.Env, rt.WaitDelay = env, time.Second
 	b, err := rt.Output()
 	if err != nil {
-		return rewound{}, failure(ctx, "hermes --print-runtime-command: "+err.Error())
+		return "", 0, failure(ctx, "hermes --print-runtime-command: "+err.Error())
 	}
 	var argv []string
 	if err := json.Unmarshal(b, &argv); err != nil || len(argv) == 0 || argv[0] == "" {
-		return rewound{}, errors.New("hermes printed no runtime command")
+		return "", 0, errors.New("hermes printed no runtime command")
 	}
 	agent, _ := json.Marshal(h.HermesAgent) // a JSON string is a valid Python string literal
-	code := "import sys; sys.path.insert(0, " + string(agent) + "); import hermes_bootstrap\n" + rewindScript
-	cmd := exec.CommandContext(ctx, argv[0], "-I", "-c", code, sid, strconv.FormatInt(before, 10))
+	code := "import sys; sys.path.insert(0, " + string(agent) + "); import hermes_bootstrap\n" + script
+	cmd := exec.CommandContext(ctx, argv[0], append([]string{"-I", "-c", code}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Env, cmd.Stderr, cmd.WaitDelay = env, &stderr, time.Second
 	b, err = cmd.Output()
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == exitNotUserMessage {
-		return rewound{}, errNotUserMessage
-	}
 	if err != nil {
+		exit := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitCode()
+		}
 		reason := lastLine(stderr.String())
 		if reason == "" {
 			reason = err.Error()
 		}
-		return rewound{}, failure(ctx, reason)
+		return "", exit, failure(ctx, reason)
 	}
-	var out rewound
-	if err := json.Unmarshal([]byte(lastLine(string(b))), &out); err != nil {
-		return rewound{}, errors.New("the rewind script printed no result")
-	}
-	return out, nil
+	return lastLine(string(b)), 0, nil
 }
 
 // failure is "timed out" or the reason, at most 200 characters.

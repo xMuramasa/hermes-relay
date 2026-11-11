@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xMuramasa/trismegistus/relay/internal/store"
 )
@@ -246,8 +247,16 @@ func TestSessionEffort(t *testing.T) {
 		t.Fatalf("model_options sent with the runs: %q", got)
 	}
 
-	if status, b := r.do("DELETE", "/api/sessions/"+high, manager, nil); status/100 != 2 {
-		t.Fatalf("DELETE: %d %s", status, b)
+	// The fake's run in that session may still be ending (409 busy while a run writes); slow under -race.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		status, b := r.do("DELETE", "/api/sessions/"+high, manager, nil)
+		if status == http.StatusConflict && time.Now().Before(deadline) {
+			continue
+		}
+		if status/100 != 2 {
+			t.Fatalf("DELETE: %d %s", status, b)
+		}
+		break
 	}
 	if got := sessionEfforts(); len(got) != 1 || got[off] != "none" {
 		t.Fatal(got)

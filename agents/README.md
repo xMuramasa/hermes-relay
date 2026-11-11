@@ -34,6 +34,11 @@ so the relay container's user can connect):
   `hermes --print-runtime-command` (asked every time: it moves with Hermes updates), with `HERMES_HOME` set; 20 s at
   most. 400 `bad_request` for a bad id or `n` (nothing runs), 404 `not_a_user_message`, 502 `rewind_failed` with a
   short reason (the script's last stderr line, ≤ 200 characters, or `timed out`).
+- `GET /search?q=<text>&limit=n` → `{"results", "more"}`: Hermes' message index (`SessionDB.search_messages`),
+  re-checked against each message's own text (no tool calls, recalled memory or compaction summaries); the result
+  shape is in SPEC.md (Search). It runs `search.py` (embedded) as rewinds run theirs, 10 s at most, 2 at once. 400
+  `bad_request` for `q` outside 2-200 characters or `limit` outside 1-100 (nothing runs), 502 `search_failed` as
+  for rewinds. The query and snippets are never logged.
 
 Flags: `-socket`, `-processes` (default `~/.hermes/processes.json`), `-runs` (comma-separated, default
 `~/.local/state/hermes-runs,~/.hermes/cache/scratch/tmac/wt`: the old scratch folder is read as a second directory
