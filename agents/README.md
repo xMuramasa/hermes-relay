@@ -43,7 +43,7 @@ until it is empty; a run's file comes from the first directory that has it), `-h
 ## Install (optiplex, as your user)
 
 ```sh
-cd ~/Projects/trismegistus/agents
+cd ~/Projects/hermes-relay/agents
 go build -o ~/.local/bin/trismegistus-agents .
 mkdir -p ~/.config/systemd/user
 cp trismegistus-agents.service ~/.config/systemd/user/

@@ -55,7 +55,7 @@ Each open and close is logged with the device, pid, duration and exit status. Ne
 ## Install (optiplex, as your user)
 
 ```sh
-cd ~/Projects/trismegistus/term
+cd ~/Projects/hermes-relay/term
 go build -o ~/.local/bin/trismegistus-term .
 mkdir -p ~/.local/state/trismegistus-term ~/.config/systemd/user
 chmod 750 ~/.local/state/trismegistus-term
