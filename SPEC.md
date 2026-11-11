@@ -33,7 +33,7 @@ connections and keeps Hermes' API key off the devices.
 - Approvals stay in Hermes' smart mode: only commands the AI reviewer escalates reach the phone. The modal offers
   Once / This session / Deny; Hermes' `always` choice is hidden on purpose.
 - Logs: the relay's stdout shows in Dozzle; Hermes' own logs are already there (`homelab/hermes-logs`).
-- Private repo `xMuramasa/trismegistus` (`~/Projects/trismegistus` on optiplex), direct
+- Private repo `xMuramasa/hermes-relay` (`~/Projects/hermes-relay` on optiplex), direct
   commits to `main`.
 
 ## Flow
@@ -482,7 +482,7 @@ Messages are JSON objects with a `type` field, defined in `protocol/schema.json`
 
 ## Deploy (homelab)
 
-- `~/Projects/homelab/trismegistus/docker-compose.yml` builds the relay from `~/Projects/trismegistus`.
+- `~/Projects/homelab/trismegistus/docker-compose.yml` builds the relay from `~/Projects/hermes-relay`.
 - Caddy: `hermes.lab.x-muramasa.dev` → `reverse_proxy 172.18.0.1:8650` (WebSockets pass through); `docker restart
   caddy` after editing.
 - Homepage tile. An Uptime Kuma monitor on `/healthz` is added by hand in its UI.
@@ -527,5 +527,5 @@ relay has gained the cron, news, model and conversation-management endpoints fro
 - Address: `hermes.lab.x-muramasa.dev`.
 - Pairing: QR printed by a command on optiplex (one user for now).
 - Approvals: a modal in the app, no fingerprint.
-- Code: `~/Projects/trismegistus` on optiplex; the Mac gets a clone.
+- Code: `~/Projects/hermes-relay` on optiplex; the Mac gets a clone.
 - Name: Trismegistus (app, repo, relay container).

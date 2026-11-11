@@ -1,9 +1,10 @@
-# Trismegistus
+# hermes-relay
 
-The relay server and WebSocket protocol behind the companion apps for
+The relay server and WebSocket protocol behind the Trismegistus companion apps for
 [Hermes Agent](https://hermes-agent.nousresearch.com) running on a home server: the native macOS app
-([trismegistus-mac](https://github.com/xMuramasa/trismegistus-mac)) and a native Android app (planned, its own repo).
-See [SPEC.md](SPEC.md).
+([trismegistus-mac](https://github.com/xMuramasa/trismegistus-mac)) and the native Android app
+([trismegistus-android](https://github.com/xMuramasa/trismegistus-android)). This repo was `xMuramasa/trismegistus`
+until 2026-11-11; GitHub redirects the old links. See [SPEC.md](SPEC.md).
 
 ```
 apps (macOS, Android) --WebSocket--> relay (Go) --HTTP/SSE--> Hermes API server (localhost only)
