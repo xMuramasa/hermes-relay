@@ -27,7 +27,7 @@ A device has at most 3 sockets; a 4th closes the oldest. A revoked device is dis
 | `auth` | `token` | first message only |
 | `subscribe` | `session_id`, `after_seq?` | |
 | `unsubscribe` | `session_id` | |
-| `prompt` | `client_msg_id`, `session_id`, `text`, `attachments?` | `client_msg_id` = a UUID per message; resending it never starts a second run. `attachments`: 1-4 unique ids from `POST /api/attachments` (64 lowercase hex); `text` may be `""` only with at least one |
+| `prompt` | `client_msg_id`, `session_id`, `text`, `attachments?`, `rewind_to?` | `client_msg_id` = a UUID per message; resending it never starts a second run. `attachments`: 1-4 unique ids from `POST /api/attachments` (64 lowercase hex); `text` may be `""` only with at least one. `rewind_to` (integer ≥ 1): the Hermes message id of one of the session's user messages; the conversation is first rewound to just before it (retry and edit; errors `not_found`, `hermes_unavailable`, `hermes_error`, see SPEC.md) |
 | `stop` | `run_id` | |
 | `steer` | `run_id`, `text` | only while the run is `running` |
 | `approve` | `run_id`, `request_id`, `choice` | `once` \| `session` \| `deny` (`always` is refused) |

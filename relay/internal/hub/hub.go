@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xMuramasa/trismegistus/relay/internal/agents"
 	"github.com/xMuramasa/trismegistus/relay/internal/hermes"
 	"github.com/xMuramasa/trismegistus/relay/internal/protocol"
 	"github.com/xMuramasa/trismegistus/relay/internal/store"
@@ -55,6 +56,7 @@ const MaxPromptImageBytes = 7 << 20
 type Hub struct {
 	store  eventStore
 	hermes *hermes.Client
+	agents *agents.Client // the host helper, for rewinds; nil when not set up
 	log    *slog.Logger
 	opts   Options
 
@@ -104,6 +106,9 @@ func New(st *store.Store, hc *hermes.Client, log *slog.Logger, opts Options) *Hu
 		inflight: map[string]*pending{}, sources: map[string]string{},
 	}
 }
+
+// SetAgents lets prompts rewind a conversation first (rewind_to) through the host helper. Call it before serving.
+func (h *Hub) SetAgents(c *agents.Client) { h.agents = c }
 
 // Start re-attaches every run the database still has as in progress. Each first gets a reconnected event.
 func (h *Hub) Start(ctx context.Context) error {
@@ -323,7 +328,9 @@ const SourceAPIServer = "api_server"
 // Prompt starts a run for clientMsgID, or acknowledges the run it already started. onAck runs before any of the
 // run's events are delivered. Only the first of concurrent calls for one clientMsgID looks it up and starts the run;
 // checking the database first would let a resend miss both the row (not stored yet) and the inflight entry (gone).
-func (h *Hub) Prompt(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, attachments []string, onAck func(runID string, replayed bool)) error {
+// rewindTo > 0 first rewinds the conversation to just before that user message (a Hermes message id); a replay never
+// rewinds.
+func (h *Hub) Prompt(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, attachments []string, rewindTo int64, onAck func(runID string, replayed bool)) error {
 	h.mu.Lock()
 	if p := h.inflight[clientMsgID]; p != nil {
 		h.mu.Unlock()
@@ -348,7 +355,7 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, device, clientMsgID, s
 	} else if !errors.Is(err, store.ErrNotFound) {
 		p.err = protocol.Errorf(protocol.CodeInternal, "internal error")
 	} else {
-		p.runID, p.err = h.startRun(ctx, deviceID, device, clientMsgID, sessionID, text, attachments, onAck)
+		p.runID, p.err = h.startRun(ctx, deviceID, device, clientMsgID, sessionID, text, attachments, rewindTo, onAck)
 	}
 	h.mu.Lock()
 	delete(h.inflight, clientMsgID)
@@ -357,7 +364,7 @@ func (h *Hub) Prompt(ctx context.Context, deviceID int64, device, clientMsgID, s
 	return p.err
 }
 
-func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, ids []string, onAck func(string, bool)) (string, error) {
+func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID, sessionID, text string, ids []string, rewindTo int64, onAck func(string, bool)) (string, error) {
 	arrived := time.Now()
 	src, err := h.SessionSource(ctx, sessionID)
 	if err != nil {
@@ -387,6 +394,17 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID,
 	}
 	s.starting = true
 	s.mu.Unlock()
+
+	// Under the start lock, so no other prompt lands between the rewind and the run. A run that then fails to start
+	// leaves the conversation rewound; the app keeps the text and resends it as a plain prompt.
+	if rewindTo > 0 {
+		if err := h.rewind(context.WithoutCancel(ctx), sessionID, rewindTo); err != nil {
+			s.mu.Lock()
+			s.starting = false
+			h.unlockSession(s)
+			return "", err
+		}
+	}
 
 	// The model chosen for this conversation in the apps, if any (Hermes' default otherwise).
 	var model hermes.RunModel
@@ -450,6 +468,30 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID,
 		"hermes_ms", hermesMS, "start_ms", time.Since(arrived).Milliseconds())
 	go h.track(rs, false)
 	return rs.id, nil
+}
+
+// rewind cuts a conversation to just before its user message before, through the agents helper.
+func (h *Hub) rewind(ctx context.Context, sessionID string, before int64) error {
+	if h.agents == nil {
+		h.log.Warn("rewind failed", "session_id", sessionID, "message_id", before, "err", "no agents helper configured")
+		return protocol.Errorf(protocol.CodeHermesUnavailable, "the agents helper isn't running")
+	}
+	st, b, err := h.agents.Rewind(ctx, sessionID, before)
+	switch {
+	case err != nil:
+		h.log.Warn("rewind failed", "session_id", sessionID, "message_id", before, "err", err.Error())
+		return protocol.Errorf(protocol.CodeHermesUnavailable, "the agents helper isn't running")
+	case st == http.StatusNotFound:
+		h.log.Info("rewind refused", "session_id", sessionID, "message_id", before, "helper_status", st)
+		return protocol.Errorf(protocol.CodeNotFound, "that is not one of this conversation's messages")
+	case st != http.StatusOK:
+		h.log.Warn("rewind failed", "session_id", sessionID, "message_id", before, "helper_status", st, "helper_answer", trunc(string(b), 300))
+		return protocol.Errorf(protocol.CodeHermesError, "rewinding the conversation failed")
+	}
+	var out struct{ Rewound, Turns int }
+	_ = json.Unmarshal(b, &out)
+	h.log.Info("rewound", "session_id", sessionID, "message_id", before, "rewound", out.Rewound, "turns", out.Turns)
+	return nil
 }
 
 // createRun reads the prompt's images only now, so their bytes and data URLs live just for the Hermes request.

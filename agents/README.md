@@ -28,10 +28,17 @@ so the relay container's user can connect):
   and with symlinks resolved, under your home directory with no component starting with `.` except under
   `~/.hermes/cache/`; a regular file with extension png, jpg, jpeg, gif or webp whose first bytes match it; at most
   10 MiB. 200 with `Content-Type` and `Cache-Control: private, max-age=3600`; anything else is 404 `not_found`.
+- `POST /sessions/{id}/rewind {"before_message_id": n}` → `{"rewound", "turns"}`: rewinds the conversation to just
+  before its user message `n` (a Hermes message id) with Hermes' own `SessionDB.rewind_user_turn` (rows soft-deleted).
+  It runs `rewind.py` (embedded) as `<python> -I -c <bootstrap + script> <id> <n>`, the Python being element 0 of
+  `hermes --print-runtime-command` (asked every time: it moves with Hermes updates), with `HERMES_HOME` set; 20 s at
+  most. 400 `bad_request` for a bad id or `n` (nothing runs), 404 `not_a_user_message`, 502 `rewind_failed` with a
+  short reason (the script's last stderr line, ≤ 200 characters, or `timed out`).
 
 Flags: `-socket`, `-processes` (default `~/.hermes/processes.json`), `-runs` (comma-separated, default
 `~/.local/state/hermes-runs,~/.hermes/cache/scratch/tmac/wt`: the old scratch folder is read as a second directory
-until it is empty; a run's file comes from the first directory that has it).
+until it is empty; a run's file comes from the first directory that has it), `-hermes` (default
+`~/.local/bin/hermes`), `-hermes-home` (default `~/.hermes`), `-hermes-agent` (default `~/.hermes/hermes-agent`).
 
 ## Install (optiplex, as your user)
 
