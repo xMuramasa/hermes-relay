@@ -115,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/models", s.logged(s.authed(s.listModels)))
 	mux.HandleFunc("PUT /api/sessions/{id}/model", s.logged(s.authed(s.setSessionModel)))
 	mux.HandleFunc("GET /api/session-models", s.logged(s.authed(s.listSessionModels)))
+	mux.HandleFunc("PUT /api/sessions/{id}/effort", s.logged(s.authed(s.setSessionEffort)))
+	mux.HandleFunc("GET /api/session-efforts", s.logged(s.authed(s.listSessionEfforts)))
 	mux.HandleFunc("PUT /api/sessions/{id}/continues", s.logged(s.authed(s.setContinues)))
 	mux.HandleFunc("GET /api/links", s.logged(s.authed(s.listLinks)))
 	// Cron jobs (jobs.go): every device reads, managers write.

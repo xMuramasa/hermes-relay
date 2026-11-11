@@ -132,7 +132,47 @@ func (s *Store) SetSessionModel(ctx context.Context, sessionID string, m Session
 	return err
 }
 
-// ForgetSession drops a deleted session's links (both sides, leaving two shorter chains) and model choice.
+// SessionEfforts returns every session's chosen reasoning effort.
+func (s *Store) SessionEfforts(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id, effort FROM session_efforts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, e string
+		if err := rows.Scan(&id, &e); err != nil {
+			return nil, err
+		}
+		out[id] = e
+	}
+	return out, rows.Err()
+}
+
+// SessionEffortFor returns the reasoning effort chosen for one session, "" when none.
+func (s *Store) SessionEffortFor(ctx context.Context, sessionID string) (string, error) {
+	var e string
+	err := s.db.QueryRowContext(ctx, `SELECT effort FROM session_efforts WHERE session_id = ?`, sessionID).Scan(&e)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return e, err
+}
+
+// SetSessionEffort records a session's reasoning effort, or drops it when effort is "".
+func (s *Store) SetSessionEffort(ctx context.Context, sessionID, effort string) error {
+	if effort == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM session_efforts WHERE session_id = ?`, sessionID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_efforts (session_id, effort, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT (session_id) DO UPDATE SET effort = excluded.effort, updated_at = excluded.updated_at`,
+		sessionID, effort, s.ms())
+	return err
+}
+
+// ForgetSession drops a deleted session's links (both sides, leaving two shorter chains), model and effort choices.
 func (s *Store) ForgetSession(ctx context.Context, sessionID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -143,6 +183,9 @@ func (s *Store) ForgetSession(ctx context.Context, sessionID string) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_models WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_efforts WHERE session_id = ?`, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit()

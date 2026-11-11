@@ -188,3 +188,68 @@ func TestChosenModelReachesRuns(t *testing.T) {
 		t.Fatalf("models sent with the runs: %q", got)
 	}
 }
+
+// A conversation's reasoning effort is the relay's own record, sent to Hermes as model_options with each run.
+func TestSessionEffort(t *testing.T) {
+	fake := newFake(t, "plain")
+	r := newRelay(t, fake)
+	viewer, manager := r.pair("pixel-8"), r.pairAs("macbook", store.RoleManager)
+	high, off, plain, tg := fake.AddSession("api_server"), fake.AddSession("api_server"), fake.AddSession("api_server"), fake.AddSession("telegram")
+
+	sessionEfforts := func() map[string]string {
+		t.Helper()
+		var out struct{ Sessions map[string]string }
+		if status, b := r.do("GET", "/api/session-efforts", viewer, nil); status != 200 || json.Unmarshal(b, &out) != nil || out.Sessions == nil {
+			t.Fatalf("GET /api/session-efforts: %d %s", status, b)
+		}
+		return out.Sessions
+	}
+	if got := sessionEfforts(); len(got) != 0 {
+		t.Fatal(got)
+	}
+	for _, c := range []struct {
+		id, tok, body string
+		status        int
+		answer        string
+	}{
+		{high, manager, `{"effort": "low"}`, 200, `{"effort":"low"}`},
+		{high, viewer, `{"effort": "high"}`, 200, `{"effort":"high"}`},
+		{off, manager, `{"effort": "none"}`, 200, `{"effort":"none"}`},
+		{plain, manager, `{"effort": "max"}`, 200, `{"effort":"max"}`},
+		{plain, manager, `{"effort": null}`, 200, `{"effort":null}`},
+		{plain, manager, `{"effort": "ultra"}`, 400, ""},
+		{plain, manager, `{"effort": "minimal"}`, 400, ""},
+		{plain, manager, `{"effort": "HIGH"}`, 400, ""},
+		{plain, manager, `{"effort": 3}`, 400, ""},
+		{plain, manager, `{}`, 400, ""},
+		{plain, manager, `{"effort": "low", "fast": true}`, 400, ""},
+		{"api_404_nope", manager, `{"effort": "low"}`, 404, ""},
+		{tg, manager, `{"effort": "low"}`, 403, ""},
+	} {
+		status, b := r.do("PUT", "/api/sessions/"+c.id+"/effort", c.tok, c.body)
+		if status != c.status || c.answer != "" && string(bytes.TrimSpace(b)) != c.answer {
+			t.Fatalf("PUT %s: %d %s", c.body, status, b)
+		}
+	}
+	if got := sessionEfforts(); len(got) != 2 || got[high] != "high" || got[off] != "none" {
+		t.Fatal(got)
+	}
+
+	cl := r.connect(manager)
+	for _, sid := range []string{high, off, plain} {
+		if _, ack := cl.prompt(sid); ack.str("type") != "ack" {
+			t.Fatalf("prompt in %s: %v", sid, ack)
+		}
+	}
+	want := []string{`{"reasoning":{"effort":"high"}}`, `{"reasoning":{"enabled":false}}`, ""}
+	if got := fake.RunOptionsSeen(); len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("model_options sent with the runs: %q", got)
+	}
+
+	if status, b := r.do("DELETE", "/api/sessions/"+high, manager, nil); status/100 != 2 {
+		t.Fatalf("DELETE: %d %s", status, b)
+	}
+	if got := sessionEfforts(); len(got) != 1 || got[off] != "none" {
+		t.Fatal(got)
+	}
+}
