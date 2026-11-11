@@ -102,6 +102,12 @@ var migrations = []string{
 	CREATE INDEX run_attachments_attachment ON run_attachments(attachment_id);`,
 	// Terminal grant (#31): off for every device until `devices terminal NAME on`.
 	`ALTER TABLE devices ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0;`,
+	// Per-session reasoning effort (#32), sent to Hermes with each run.
+	`CREATE TABLE session_efforts (
+		session_id TEXT PRIMARY KEY,
+		effort TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.

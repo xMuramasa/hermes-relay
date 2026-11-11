@@ -152,6 +152,7 @@ type Fake struct {
 	RunInputs   []string // the text, or the raw JSON of a list input
 	messages    map[string][]map[string]any
 	RunModels   []string // "provider/model" per created run, "" when the body named none
+	RunOptions  []string // the raw model_options JSON per created run, "" when the body had none
 	Approvals   []ApprovalCall
 	Stops       []string
 	Steers      []string
@@ -494,6 +495,13 @@ func (f *Fake) RunModelsSeen() []string {
 	return append([]string(nil), f.RunModels...)
 }
 
+// RunOptionsSeen returns the raw model_options each created run carried, in order ("" for none).
+func (f *Fake) RunOptionsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.RunOptions...)
+}
+
 func (f *Fake) ModelLock(id string) [2]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -564,6 +572,7 @@ func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 		SessionID string          `json:"session_id"`
 		Provider  string          `json:"provider"`
 		Model     string          `json:"model"`
+		Options   json.RawMessage `json:"model_options"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json"})
@@ -642,6 +651,7 @@ func (f *Fake) createRun(w http.ResponseWriter, r *http.Request) {
 	} else {
 		f.RunModels = append(f.RunModels, "")
 	}
+	f.RunOptions = append(f.RunOptions, string(body.Options))
 	if key != "" {
 		f.idem[key] = id
 	}

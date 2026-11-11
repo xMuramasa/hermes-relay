@@ -43,6 +43,7 @@ type eventStore interface {
 	InsertRun(ctx context.Context, r store.Run) error
 	RunByClientMsgID(ctx context.Context, clientMsgID string) (store.Run, error)
 	SessionModelFor(ctx context.Context, sessionID string) (store.SessionModel, bool, error)
+	SessionEffortFor(ctx context.Context, sessionID string) (string, error)
 	Attachments(ctx context.Context, ids []string) ([]store.Attachment, error)
 	ReadAttachment(id string) ([]byte, error)
 }
@@ -393,6 +394,11 @@ func (h *Hub) startRun(ctx context.Context, deviceID int64, device, clientMsgID,
 		h.log.Warn("reading the session's model failed; using Hermes' default", "session_id", sessionID, "err", err.Error())
 	} else if ok {
 		model = hermes.RunModel{Provider: m.Provider, Model: m.Model}
+	}
+	if e, err := h.store.SessionEffortFor(ctx, sessionID); err != nil {
+		h.log.Warn("reading the session's effort failed; using Hermes' default", "session_id", sessionID, "err", err.Error())
+	} else {
+		model.Effort = e
 	}
 
 	// Detached from the socket: if the phone drops now, Hermes may still start the run, and the resend with the

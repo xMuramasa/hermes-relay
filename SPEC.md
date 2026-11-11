@@ -84,7 +84,13 @@ Limits:
 - Phone chats share the Claude usage limit with everything else (unless a chat's chosen model runs elsewhere, e.g.
   GitHub Copilot). A chat's model choice (REST) is stored in the relay and as Hermes' session lock, and sent as
   `provider` + `model` with each `POST /v1/runs` (which ignores the lock). The `Idempotency-Key` covers the body, so a
-  resend after the model changed may be refused rather than replayed.
+  resend after the model changed may be refused rather than replayed. A chat's reasoning effort (REST) lives only in
+  the relay and rides in the same body as `"model_options": {"reasoning": {"effort": "<effort>"}}`, or
+  `{"reasoning": {"enabled": false}}` for `none`; without a choice there is no `model_options` and Hermes uses its
+  `agent.reasoning_effort` (checked 2026-11-11: Hermes takes `none, minimal, low, medium, high, xhigh, max, ultra`,
+  ignores unknown values and clamps per provider). Fast mode (`model_options.fast`) is never sent: on Claude plans it
+  is billed as extra usage. Reasoning text needs nothing more: Hermes' stored assistant messages carry `reasoning`,
+  which `GET /api/sessions/:id/messages` passes through; `reasoning.available` run events stay dropped.
 - No text streaming (see Decisions): the answer arrives with `run.completed`.
 
 ## Relay (`relay/`)
@@ -95,7 +101,7 @@ Limits:
 - One binary, `trismegistus-relay`, with subcommands: `serve` (default), `pair --name <device>
   [--role manager|viewer]`, `devices list`, `devices set-role <name> <role>`, `devices terminal <name> on|off`, `devices revoke <name>`, `healthcheck` (for Docker; the image has no shell or curl).
 - Storage: SQLite at `/data/relay.db` (named volume): devices, one-time pairing codes, the per-session event log,
-  session tags, handoff links, per-session model choices and image attachments (files in `/data/attachments/`).
+  session tags, handoff links, per-session model and effort choices and image attachments (files in `/data/attachments/`).
 - Container `trismegistus-relay`: multi-stage build (`golang:1.27.3-bookworm` → `gcr.io/distroless/static-debian12:
   nonroot`), `CGO_ENABLED=0`, ~25 MB image (6.4 MB compressed; measured 2026-10-24). `network_mode: host` so it can reach `127.0.0.1:8642`; listens on
   `172.18.0.1:8650` (the `proxy` network's gateway, where Caddy can reach it, like hindsight-ui). Non-root, read-only
@@ -156,6 +162,13 @@ Limits:
   would change another surface's conversation); the relay forwards Hermes' session lock, stores the choice and
   answers `{"provider", "model"}`. `GET /api/session-models` → `{"sessions": {"<id>": {"provider", "model"}}}`;
   sessions left out use `current`.
+- Reasoning effort. `PUT /api/sessions/:id/effort {"effort": "none" | "low" | "medium" | "high" | "xhigh" | "max" |
+  null}` (any paired device, like the model PUT) stores the chat's effort and answers `{"effort": <same>}`; `null`
+  clears it (Hermes' default again). Any other value or a missing `effort` is `bad_request` (`minimal` and `ultra`
+  too: no connected model takes them); unknown session `not_found`; a session that is not a relay chat `read_only`
+  (only relay chats start runs). `GET /api/session-efforts` → `{"sessions": {"<id>": "<effort>"}}`; sessions left
+  out use Hermes' default. Sent with each run as above. Handoffs don't copy it (the relay copies no model choice
+  either).
 - Handoff links: when a conversation grows too large the app starts a new one from a digest and shows both as one
   thread. The link lives in the relay, not Hermes (Hermes' own compression children redirect the old id to the
   child, which would hide the old messages). `PUT /api/sessions/:id/continues {"from": "<older id>"}` records that
@@ -164,7 +177,7 @@ Limits:
   once, no self-links or loops, at most 32 links per chain; violations are `bad_request`. `{"from": null}` removes
   the link (no existence check). Answers `{"from": ...}` as stored. `GET /api/links` → `{"continues": {"<newer>":
   "<older>"}}`. Deleting a session through the relay drops the links on both sides of it (leaving two shorter
-  chains) and its model choice; ids deleted elsewhere may linger, as with tags.
+  chains) and its model and effort choices; ids deleted elsewhere may linger, as with tags.
 - Image attachments (#25; WebSocket messages are capped at 64 KiB, so images have their own upload path; Hermes keeps
   only the text plus a `[screenshot]` line, never the image, so the relay stores them):
   - `POST /api/attachments`, `manager` only (`forbidden` for viewers). Body: the image bytes, `Content-Type`

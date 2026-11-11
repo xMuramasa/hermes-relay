@@ -377,11 +377,31 @@ func TestSessionLinks(t *testing.T) {
 	if m, err := s.SessionModels(ctx); err != nil || m["b"] != (SessionModel{"copilot", "m2"}) {
 		t.Fatal(m, err)
 	}
+	for _, e := range []string{"low", "max"} {
+		if err := s.SetSessionEffort(ctx, "b", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetSessionEffort(ctx, "d", "high"); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := s.SessionEffortFor(ctx, "b"); err != nil || e != "max" {
+		t.Fatal(e, err)
+	}
 	if err := s.ForgetSession(ctx, "b"); err != nil || links() != "c>x" {
 		t.Fatal(links(), err)
 	}
 	if m, _ := s.SessionModels(ctx); len(m) != 0 {
 		t.Fatal(m)
+	}
+	if e, _ := s.SessionEfforts(ctx); len(e) != 1 || e["d"] != "high" {
+		t.Fatal(e)
+	}
+	if err := s.SetSessionEffort(ctx, "d", ""); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := s.SessionEffortFor(ctx, "d"); err != nil || e != "" {
+		t.Fatal(e, err)
 	}
 	if err := s.SetContinues(ctx, "c", "", 32); err != nil || links() != "" {
 		t.Fatal(links(), err)

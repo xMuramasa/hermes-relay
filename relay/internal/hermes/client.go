@@ -266,10 +266,11 @@ type RunCreated struct {
 }
 
 // CreateRun starts a turn. idempotencyKey makes resends return the same run.
-// RunModel picks the model for one run; the zero value leaves it to Hermes (its default).
+// RunModel picks the model and reasoning effort for one run; zero fields leave them to Hermes (its defaults).
 type RunModel struct {
 	Provider string
 	Model    string
+	Effort   string // "none" turns reasoning off
 }
 
 // Image is a prompt's image, sent to Hermes as a data URL.
@@ -299,6 +300,11 @@ func (c *Client) CreateRun(ctx context.Context, sessionID, input, idempotencyKey
 	}
 	if model.Provider != "" && model.Model != "" {
 		body["provider"], body["model"] = model.Provider, model.Model
+	}
+	if model.Effort == "none" {
+		body["model_options"] = map[string]any{"reasoning": map[string]any{"enabled": false}}
+	} else if model.Effort != "" {
+		body["model_options"] = map[string]any{"reasoning": map[string]any{"effort": model.Effort}}
 	}
 	err := c.doJSON(ctx, http.MethodPost, "/v1/runs", body, &out, hdr)
 	if err == nil && !protocol.ValidID(out.RunID) {

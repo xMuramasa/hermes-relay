@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"sync"
@@ -128,6 +129,60 @@ func (s *Server) setSessionModel(w http.ResponseWriter, r *http.Request, dev sto
 	}
 	s.log.Info("session model set", "session_id", id, "device", dev.Name, "provider", m.Provider, "model", m.Model)
 	writeJSON(w, http.StatusOK, m)
+}
+
+// efforts are the reasoning efforts a conversation can pick; Hermes also takes minimal and ultra, which no model
+// Martin has accepts.
+var efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
+
+// setSessionEffort records a relay chat's reasoning effort (null clears it), sent to Hermes with each run.
+func (s *Server) setSessionEffort(w http.ResponseWriter, r *http.Request, dev store.Device) {
+	id, ok := sessionID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Effort json.RawMessage `json:"effort"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		writeError(w, err, 0)
+		return
+	}
+	var effort *string
+	if len(body.Effort) == 0 || json.Unmarshal(body.Effort, &effort) != nil || effort != nil && !slices.Contains(efforts, *effort) {
+		writeError(w, protocol.Errorf(protocol.CodeBadRequest, "effort must be one of none, low, medium, high, xhigh, max, or null"), 0)
+		return
+	}
+	src, ok := s.sessionSource(w, r, id)
+	if !ok {
+		return
+	}
+	if src != hub.SourceAPIServer {
+		writeError(w, protocol.Errorf(protocol.CodeReadOnly, "only relay chats can change effort"), 0)
+		return
+	}
+	e := ""
+	if effort != nil {
+		e = *effort
+	}
+	if err := s.store.SetSessionEffort(r.Context(), id, e); err != nil {
+		s.log.Error("storing session effort failed", "session_id", id, "err", err.Error())
+		writeError(w, protocol.Errorf(protocol.CodeInternal, "internal error"), 0)
+		return
+	}
+	s.log.Info("session effort set", "session_id", id, "device", dev.Name, "effort", e)
+	writeJSON(w, http.StatusOK, map[string]any{"effort": effort})
+}
+
+// listSessionEfforts answers the chosen efforts; sessions left out use Hermes' default.
+func (s *Server) listSessionEfforts(w http.ResponseWriter, r *http.Request, _ store.Device) {
+	chosen, err := s.store.SessionEfforts(r.Context())
+	if err != nil {
+		s.log.Error("reading session efforts failed", "err", err.Error())
+		writeError(w, protocol.Errorf(protocol.CodeInternal, "internal error"), 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": chosen})
 }
 
 // listSessionModels answers the chosen models; sessions left out use the list's current model.
