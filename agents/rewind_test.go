@@ -13,15 +13,7 @@ import (
 // fakeHermes stands in for hermes and its Python: hermes prints the fake python's path; the python records its argv
 // and HERMES_HOME, then acts on the message id (its last argument).
 func fakeHermes(t *testing.T, e *env) (argvFile string) {
-	t.Helper()
-	dir := t.TempDir()
-	py := filepath.Join(dir, "python3")
-	argvFile = filepath.Join(dir, "argv")
-	e.write(filepath.Join(dir, "hermes"), "#!/bin/sh\n[ \"$1\" = --print-runtime-command ] || exit 9\necho '[\""+py+"\", \"-m\", \"hermes\"]'\n")
-	e.write(py, `#!/bin/sh
-printf '%s\0' "$@" > `+argvFile+`
-printf '%s' "$HERMES_HOME" > `+argvFile+`.home
-eval "last=\${$#}"
+	return fakeInterpreter(t, e, `eval "last=\${$#}"
 case "$last" in
 7) echo 'some import chatter'; echo '{"rewound": 10, "turns": 2}' ;;
 8) exit 3 ;;
@@ -30,6 +22,20 @@ case "$last" in
 11) echo 'not json' ;;
 esac
 `)
+}
+
+// fakeInterpreter is fakeHermes with the python's behaviour given as shell (after recording argv; $DIR is its dir).
+func fakeInterpreter(t *testing.T, e *env, act string) (argvFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	py := filepath.Join(dir, "python3")
+	argvFile = filepath.Join(dir, "argv")
+	e.write(filepath.Join(dir, "hermes"), "#!/bin/sh\n[ \"$1\" = --print-runtime-command ] || exit 9\necho '[\""+py+"\", \"-m\", \"hermes\"]'\n")
+	e.write(py, `#!/bin/sh
+DIR=`+dir+`
+printf '%s\0' "$@" > `+argvFile+`
+printf '%s' "$HERMES_HOME" > `+argvFile+`.home
+`+act)
 	for _, f := range []string{"hermes", "python3"} {
 		if err := os.Chmod(filepath.Join(dir, f), 0o755); err != nil {
 			t.Fatal(err)

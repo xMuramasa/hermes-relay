@@ -76,10 +76,11 @@ type Server struct {
 
 	termSocket string // empty: /api/terminal answers not_configured
 
-	mu      sync.Mutex
-	closing bool
-	conns   map[int64][]*wsConn // by device id, oldest first
-	terms   map[*wsConn]bool    // open /api/terminal sockets
+	mu       sync.Mutex
+	closing  bool
+	conns    map[int64][]*wsConn   // by device id, oldest first
+	terms    map[*wsConn]bool      // open /api/terminal sockets
+	searches map[int64]*searchCall // by device id
 }
 
 // New makes a server.
@@ -95,6 +96,8 @@ func New(opts Options, st *store.Store, h *hub.Hub, hc *hermes.Client, log *slog
 		prompts: newLimiter(opts.PromptsPerMinute, time.Minute),
 		conns:   map[int64][]*wsConn{},
 		terms:   map[*wsConn]bool{},
+
+		searches: map[int64]*searchCall{},
 	}, nil
 }
 
@@ -144,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/agents", s.logged(s.authed(s.listAgents)))
 	mux.HandleFunc("GET /api/agents/{id}/transcript", s.logged(s.authed(s.agentTranscript)))
 	mux.HandleFunc("POST /api/agents/{id}/stop", manage(s.stopAgent))
+	mux.HandleFunc("GET /api/search", s.logged(s.authed(s.search))) // search.go, #34
 	// Image attachments (attachments.go, #25): managers upload, every device downloads.
 	mux.HandleFunc("POST /api/attachments", manage(s.uploadAttachment))
 	mux.HandleFunc("GET /api/attachments/{id}", s.logged(s.authed(s.getAttachment)))

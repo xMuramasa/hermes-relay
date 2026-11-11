@@ -354,6 +354,33 @@ helper does the work and the relay passes its JSON on.
   ordinal) and prints only counts. Answers: 200 `{"rewound", "turns"}` (rows soft-deleted, user turns undone); 404
   `not_a_user_message`; 502 `rewind_failed` with a short reason (the script's last stderr line, ≤ 200 characters, or
   `timed out`).
+- The helper also searches messages for `GET /api/search` (#34; see Search): `GET /search?q=<text>&limit=n`, `q` 2-200
+  characters after trimming and `limit` 1-100 (default 50), else 400 before anything runs. It runs `search.py` exactly
+  as rewinds run `rewind.py` (`<python> -I -c <bootstrap + search.py> <q> <limit>`), 10 s at most, at most 2 at once
+  (a third waits; a cancelled request stops waiting). 200 `{"results", "more"}`; 502 `search_failed` with a short
+  reason as for rewinds. The query and snippets are never logged.
+
+### Search (REST, for the Mac app; added 2026-11-11)
+
+Hermes' API searches titles only, so message search goes through the agents helper (Background agents), which runs
+Hermes' own message index (`SessionDB(read_only=True).search_messages`, FTS5: words, `"phrases"`, `prefix*`,
+AND/OR/NOT). What is searched: your messages and Hermes' answers in every conversation Hermes has (any source, not
+only relay chats); not tool calls or their output, not recalled memory appended to a message (`<memory-context>`),
+not compaction summaries, not rewound messages. The index matches tool calls too, so each hit (up to 300, newest
+first) is re-checked against the message's own text: every word of the query (case-insensitive, as a substring; a
+trailing `*` is a prefix; a quoted phrase as one) must occur in it; `AND`, `OR` and `NOT` are not words.
+
+- Every device: `GET /api/search?q=<text>&limit=n` (`q` 2-200 characters after trimming, `limit` 1-100, default 50;
+  else `bad_request`) → `{"results": [result, ...], "more": bool}` (`more`: there were more matches than `limit`),
+  newest first. A result: `session_id`, `message_id` (Hermes' message id, an integer), `role` (`user` or `assistant`),
+  `timestamp` (unix seconds, a float), `snippet` (the message with whitespace collapsed to single spaces, about 60
+  characters before the first match and 120 after it, `…` where cut), `marks` (`[[start, length], ...]`, every match
+  in `snippet` in UTF-16 code units, as `NSString` ranges count), `session_title` and `session_source` (Hermes'
+  `sessions` row; the title may be null).
+- One search in flight per device: a newer one cancels the older, which answers 409 `busy` (the app searches as you
+  type). Errors: helper not set up (`AGENTS_SOCKET`) or not reachable 503 `hermes_unavailable` "search needs the
+  agents helper"; helper refusal 400 `bad_request`; anything else (script failure, timeout, a bad answer) 502
+  `hermes_error` with the helper's reason. The relay never logs the query.
 
 ### Terminal (WebSocket, for the Mac app; added 2026-11-04)
 

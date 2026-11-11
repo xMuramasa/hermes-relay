@@ -40,7 +40,8 @@ func main() {
 
 	h := &Helper{Processes: *procs, Runs: strings.Split(*runs, ","), Proc: "/proc", Home: home, Grace: 10 * time.Second, Now: time.Now, Log: log,
 		StopUnit:    func(unit string) error { return exec.Command("systemctl", "--user", "stop", unit).Run() },
-		ActiveUnits: activeUnits, Hermes: *hermes, HermesHome: *hermesHome, HermesAgent: *hermesAgent, RewindTimeout: 20 * time.Second}
+		ActiveUnits: activeUnits, Hermes: *hermes, HermesHome: *hermesHome, HermesAgent: *hermesAgent, RewindTimeout: 20 * time.Second,
+		SearchTimeout: 10 * time.Second}
 	ln, err := listen(*sock)
 	if err != nil {
 		log.Error("listen failed", "socket", *sock, "err", err.Error())
