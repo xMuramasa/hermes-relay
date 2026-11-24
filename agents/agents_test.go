@@ -392,10 +392,116 @@ func TestDispatchRuns(t *testing.T) {
 	}
 }
 
+// waitUnits waits until StopUnit has been called with exactly these units.
+func (e *env) waitUnits(want string) {
+	e.t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		e.mu.Lock()
+		u := strings.Join(e.unit, ",")
+		e.mu.Unlock()
+		if u == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("systemctl stop: %q, want %q", u, want)
+		}
+	}
+}
+
+const caduceusJSON = `{"id":"run_%[1]s","repo":"xMuramasa/caduceus","issue":19,"title":"Core 4","model":"opus","effort":"high",` +
+	`"started_at":"%[2]s","unit":%[3]s}`
+
+func TestCaduceusRuns(t *testing.T) {
+	e := newEnv(t, "")
+	dir := e.h.Runs[0]
+	// A live Caduceus run, and runs whose run.json names a unit other than their own (both active), or none.
+	e.write(filepath.Join(dir, "caduceus-issue-19.run.json"), fmt.Sprintf(caduceusJSON, "caduceus-issue-19", "2026-11-23T13:53:07+00:00", `"caduceus-caduceus-issue-19.service"`))
+	e.write(filepath.Join(dir, "other-1.run.json"), fmt.Sprintf(caduceusJSON, "other-1", "2026-11-23T13:53:07+00:00", `"caduceus-other.service"`))
+	e.write(filepath.Join(dir, "evil-2.run.json"), fmt.Sprintf(caduceusJSON, "evil-2", "2026-11-23T13:53:07+00:00", `"evil.service"`))
+	e.write(filepath.Join(dir, "archived-3.run.json"), fmt.Sprintf(caduceusJSON, "archived-3", "2026-11-23T13:53:07+00:00", `null`))
+	e.active = map[string]bool{"caduceus-caduceus-issue-19.service": true, "caduceus-other.service": true, "evil.service": true}
+
+	got := e.list()
+	if a := got["run_caduceus-issue-19"]; !a.Alive || a.Repo != "xMuramasa/caduceus" || a.Issue != 19 || a.StartedAt != 1795441987 {
+		t.Fatalf("live Caduceus run: %+v", a)
+	}
+	for _, id := range []string{"run_other-1", "run_evil-2", "run_archived-3"} {
+		if a, ok := got[id]; !ok || a.Alive {
+			t.Fatalf("%s: %+v", id, a)
+		}
+		if st, _ := e.do("POST", "/agents/"+id+"/stop"); st != 404 {
+			t.Fatalf("%s stopped: %d", id, st)
+		}
+	}
+	if st, _ := e.do("POST", "/agents/run_caduceus-issue-19/stop"); st != 202 {
+		t.Fatalf("stop: %d", st)
+	}
+	e.waitUnits("caduceus-caduceus-issue-19.service")
+}
+
+func TestSameRunInTwoFolders(t *testing.T) {
+	e := newEnv(t, "")
+	first, second := e.h.Runs[0], e.h.Runs[1]
+	hourAgo := time.Now().Add(-time.Hour)
+	run := func(dir, name, startedAt, unit, from string) {
+		e.write(filepath.Join(dir, name+".run.json"), fmt.Sprintf(caduceusJSON, name, startedAt, `"`+unit+`"`))
+		e.write(filepath.Join(dir, name+".stream.jsonl"), `{"type":"system","subtype":"init","cwd":"/`+from+`"}`+"\n"+
+			`{"type":"result","subtype":"success","num_turns":1,"duration_ms":1000,"result":"from `+from+`"}`+"\n")
+		e.write(filepath.Join(dir, name+"-progress.md"), "progress "+from+"\n")
+	}
+	// The second folder's run started later; the first's files were written later (started_at wins over mtime).
+	run(first, "a-issue-1", "2026-11-22T10:00:00+00:00", "dispatch-a-issue-1.service", "dispatch")
+	run(second, "a-issue-1", "2026-11-23T10:00:00+00:00", "caduceus-a-issue-1.service", "caduceus")
+	// The first folder's run started later, its files written earlier.
+	run(first, "b-issue-2", "2026-11-23T10:00:00+00:00", "caduceus-b-issue-2.service", "caduceus")
+	run(second, "b-issue-2", "2026-11-22T10:00:00+00:00", "dispatch-b-issue-2.service", "dispatch")
+	// No run.json in the first folder: the newest run files win, here the second folder's.
+	e.write(filepath.Join(first, "c-issue-3.stream.jsonl"), `{"type":"result","subtype":"success","result":"from dispatch"}`+"\n")
+	run(second, "c-issue-3", "2026-11-23T10:00:00+00:00", "caduceus-c-issue-3.service", "caduceus")
+	for _, f := range []string{"a-issue-1.run.json", "a-issue-1.stream.jsonl", "a-issue-1-progress.md"} {
+		if err := os.Chtimes(filepath.Join(second, f), hourAgo, hourAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"b-issue-2.run.json", "b-issue-2.stream.jsonl", "b-issue-2-progress.md", "c-issue-3.stream.jsonl"} {
+		if err := os.Chtimes(filepath.Join(first, f), hourAgo, hourAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.active = map[string]bool{"dispatch-a-issue-1.service": true, "caduceus-a-issue-1.service": true,
+		"caduceus-b-issue-2.service": true, "dispatch-b-issue-2.service": true}
+
+	_, raw := e.do("GET", "/agents")
+	got := e.list()
+	for _, name := range []string{"a-issue-1", "b-issue-2", "c-issue-3"} {
+		if n := strings.Count(raw, `"id":"run_`+name+`"`); n != 1 {
+			t.Fatalf("%s listed %d times: %s", name, n, raw)
+		}
+		a := got["run_"+name]
+		if a.Cwd != "/caduceus" || a.Progress != "progress caduceus" || a.StartedAt != 1795428000 {
+			t.Fatalf("%s not from the newer folder: %+v", name, a)
+		}
+		if _, b := e.do("GET", "/agents/run_"+name+"/transcript"); !strings.Contains(b, "from caduceus") || strings.Contains(b, "from dispatch") {
+			t.Fatalf("%s transcript not from the newer folder: %s", name, b)
+		}
+	}
+	if !got["run_a-issue-1"].Alive || !got["run_b-issue-2"].Alive {
+		t.Fatalf("runs from the newer folder not alive: %s", raw)
+	}
+	if st, _ := e.do("POST", "/agents/run_a-issue-1/stop"); st != 202 {
+		t.Fatalf("stop: %d", st)
+	}
+	e.waitUnits("caduceus-a-issue-1.service")
+}
+
 func TestParseActiveUnits(t *testing.T) {
 	out := "dispatch-a-issue-1.service loaded active running a\ndispatch-b.service loaded activating start b\n" +
-		"dispatch-c.service loaded failed failed c\n\n"
-	if got := parseActiveUnits(out); len(got) != 2 || !got["dispatch-a-issue-1.service"] || !got["dispatch-b.service"] {
+		"dispatch-c.service loaded failed failed c\n\n" +
+		"caduceus-probe-issue-0.service loaded active running [systemd-run] /usr/bin/sleep 20\n" +
+		"dispatch-probe-issue-0.service loaded active running [systemd-run] /usr/bin/sleep 20\n" +
+		"caduceus-d.service loaded inactive dead d\n"
+	if got := parseActiveUnits(out); len(got) != 4 || !got["dispatch-a-issue-1.service"] || !got["dispatch-b.service"] ||
+		!got["caduceus-probe-issue-0.service"] || !got["dispatch-probe-issue-0.service"] {
 		t.Fatalf("%v", got)
 	}
 }

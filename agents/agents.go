@@ -35,14 +35,14 @@ var (
 )
 
 // Helper answers for the background work Hermes knows about. It reads only processes.json, /proc/<pid>/stat, the
-// stream, progress, result and run.json files of delegate runs in Runs, which dispatch-<name>.service units are
-// active (systemctl --user list-units), and images /media is asked for (media.go: under Home, by strict rules);
-// never environment variables or other files. Rewinds and searches run Hermes' own code in its interpreter (rewind.go,
+// stream, progress, result and run.json files of delegate runs in Runs, which dispatch-<name>.service
+// (hermes-dispatch) and caduceus-<name>.service (Caduceus) units are active (systemctl --user list-units), and images
+// /media is asked for (media.go: under Home, by strict rules); never environment variables or other files. Rewinds and searches run Hermes' own code in its interpreter (rewind.go,
 // search.go).
 type Helper struct {
 	Processes   string                  // Hermes' processes.json
-	Runs        []string                // directories of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...); the first wins
-	ActiveUnits func() map[string]bool  // active dispatch-*.service user units (injected so tests never call systemctl)
+	Runs        []string                // directories of Claude Code delegate runs (<name>-launch.sh, <name>.stream.jsonl...); see runDir
+	ActiveUnits func() map[string]bool  // active dispatch-*.service and caduceus-*.service user units (injected so tests never call systemctl)
 	Proc        string                  // /proc
 	Home        string                  // expands ~ in commands
 	Grace       time.Duration           // SIGTERM → SIGKILL
@@ -82,7 +82,7 @@ type Agent struct {
 
 	pid, start int64
 	unit       string
-	runUnit    string // dispatch-<name>.service while it is active: how a dispatch run is stopped
+	runUnit    string // dispatch-<name>.service or caduceus-<name>.service while it is active: how such a run is stopped
 }
 
 // entry is the part of a processes.json record the helper uses; the rest (session_key, task ids, watcher_*) is never
@@ -152,7 +152,8 @@ func (h *Helper) List() ([]Agent, error) {
 		}
 		out = append(out, a)
 	}
-	// A run is its stream, or its run.json alone in the first moments after dispatch starts it.
+	// A run is its stream, or its run.json alone in the first moments after dispatch starts it. A name in several
+	// directories is listed once, from runDir's.
 	for _, suffix := range []string{".stream.jsonl", ".run.json"} {
 		for _, dir := range h.Runs {
 			files, _ := filepath.Glob(filepath.Join(dir, "*"+suffix))
@@ -211,17 +212,31 @@ func (h *Helper) delegateName(command string) (string, bool) {
 		runNameRe.MatchString(name)
 }
 
-// runFile is a run's file in the first runs directory that has it (in the first directory when none does).
-func (h *Helper) runFile(name, suffix string) string {
+// runDir is the one runs directory all of a run's files are read from. dispatch and Caduceus use the same run names,
+// so a name may be in several: the one whose run.json started later wins, or, when either run.json has no readable
+// started_at, the one whose run files were written last (the first on a tie, the first directory when none has it).
+func (h *Helper) runDir(name string) string {
+	best, bestStart, bestMod := h.Runs[0], time.Time{}, time.Time{}
 	for _, d := range h.Runs {
-		if p := filepath.Join(d, name+suffix); fileExists(p) {
-			return p
+		var mod time.Time
+		for _, s := range []string{".run.json", ".stream.jsonl", "-progress.md", "-launch.sh"} {
+			if fi, err := os.Stat(filepath.Join(d, name+s)); err == nil && fi.ModTime().After(mod) {
+				mod = fi.ModTime()
+			}
+		}
+		if mod.IsZero() {
+			continue
+		}
+		var ri runInfo
+		_ = json.Unmarshal(tail(filepath.Join(d, name+".run.json"), 16<<10), &ri)
+		start, _ := time.Parse(time.RFC3339, ri.StartedAt)
+		if bestMod.IsZero() || (!start.IsZero() && !bestStart.IsZero() && start.After(bestStart)) ||
+			((start.IsZero() || bestStart.IsZero()) && mod.After(bestMod)) {
+			best, bestStart, bestMod = d, start, mod
 		}
 	}
-	return filepath.Join(h.Runs[0], name+suffix)
+	return best
 }
-
-func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // runInfo is the part of dispatch's <name>.run.json the helper uses.
 type runInfo struct {
@@ -236,8 +251,10 @@ type runInfo struct {
 // describeRun fills in a delegate run from its files: repo, issue and unit from run.json, cwd from the init line,
 // outcome from the result line, the last progress line.
 func (h *Helper) describeRun(a *Agent, name string, active func(unit string) bool) {
+	dir := h.runDir(name)
+	file := func(suffix string) string { return filepath.Join(dir, name+suffix) }
 	var ri runInfo
-	if json.Unmarshal(tail(h.runFile(name, ".run.json"), 16<<10), &ri) == nil { // missing or malformed: no run info
+	if json.Unmarshal(tail(file(".run.json"), 16<<10), &ri) == nil { // missing or malformed: no run info
 		if repoRe.MatchString(ri.Repo) && ri.Issue > 0 {
 			a.Repo, a.Issue = ri.Repo, ri.Issue
 		}
@@ -245,12 +262,13 @@ func (h *Helper) describeRun(a *Agent, name string, active func(unit string) boo
 		if t, err := time.Parse(time.RFC3339, ri.StartedAt); err == nil && a.StartedAt == 0 {
 			a.StartedAt = t.Unix()
 		}
-		// Only the run's own unit counts: a renamed -attemptK run.json still names the later attempt's unit.
-		if u := "dispatch-" + name + ".service"; ri.Unit == u && active(u) {
+		// Only the run's own unit counts: a renamed -attemptK run.json still names the later attempt's unit. This is the
+		// stop allow-list too: runUnit is the only unit Stop hands to systemctl.
+		if u := ri.Unit; (u == "dispatch-"+name+".service" || u == "caduceus-"+name+".service") && active(u) {
 			a.Alive, a.runUnit = true, u
 		}
 	}
-	stream := h.runFile(name, ".stream.jsonl")
+	stream := file(".stream.jsonl")
 	fi, err := os.Stat(stream)
 	a.Transcript = err == nil
 	if err != nil {
@@ -271,7 +289,7 @@ func (h *Helper) describeRun(a *Agent, name string, active func(unit string) boo
 	if !a.Alive && a.EndedAt == 0 {
 		a.EndedAt = fi.ModTime().Unix()
 	}
-	if lines := strings.Split(strings.TrimSpace(string(tail(h.runFile(name, "-progress.md"), 4096))), "\n"); len(lines) > 0 {
+	if lines := strings.Split(strings.TrimSpace(string(tail(file("-progress.md"), 4096))), "\n"); len(lines) > 0 {
 		a.Progress = oneLine(lines[len(lines)-1], 300)
 	}
 }
@@ -365,7 +383,8 @@ func (h *Helper) Transcript(a Agent, after int) ([]Step, int, error) {
 	if a.Kind != "delegate" || !a.Transcript {
 		return steps, after, nil // Hermes keeps other processes' output in its own memory only
 	}
-	f, err := os.Open(h.runFile(strings.TrimPrefix(a.ID, "run_"), ".stream.jsonl"))
+	name := strings.TrimPrefix(a.ID, "run_")
+	f, err := os.Open(filepath.Join(h.runDir(name), name+".stream.jsonl"))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -460,7 +479,7 @@ func oneLine(s string, n int) string { return cut(strings.Join(strings.Fields(s)
 // Stop ends a listed, live process: its systemd scope if Hermes made one, else SIGTERM to its process group and
 // SIGKILL after Grace. It returns at once; the stop finishes in the background.
 func (h *Helper) Stop(a Agent) bool {
-	if a.Alive && a.runUnit != "" { // a dispatch run: its unit holds the process tree
+	if a.Alive && a.runUnit != "" { // a dispatch or Caduceus run: its unit holds the process tree
 		go func() {
 			if err := h.StopUnit(a.runUnit); err != nil {
 				h.Log.Warn("systemctl stop failed", "id", a.ID, "err", err.Error())
