@@ -6,14 +6,19 @@ processes and Claude Code delegate runs, turns a run's `stream-json` transcript 
 process it lists. Go standard library only.
 
 It reads only `~/.hermes/processes.json`, `/proc/<pid>/stat`, the `<name>.stream.jsonl`, `<name>-progress.md` and
-`<name>.run.json` files of delegate runs in the runs directories, the active `dispatch-*.service` units
-(`systemctl --user list-units`, once per listing), and the images `/media` is asked for (below). Never environment
-variables, never other files.
+`<name>.run.json` files of delegate runs in the runs directories, the active `dispatch-*.service` and
+`caduceus-*.service` units (`systemctl --user list-units`, once per listing), and the images `/media` is asked for
+(below). Never environment variables, never other files.
 
-Runs started by `dispatch` (hermes-dispatch) are not in Hermes' process list: each is a transient user unit
-`dispatch-<name>.service`, and `<name>.run.json` beside its files names its `repo`, `issue`, `title` (listed as
-`issue_title`), `model` and `started_at`. Such a run is alive while its unit is active, and Stop is
-`systemctl --user stop` on that unit. An earlier attempt (`<name>-attemptK.*`) is a finished run with its own id.
+Runs started by `dispatch` (hermes-dispatch, files in `~/.local/state/hermes-runs`) or by Caduceus
+(`caduceus dispatch start`, files in `~/.local/state/caduceus/runs`) are not in Hermes' process list: each is a
+transient user unit `dispatch-<name>.service` or `caduceus-<name>.service`, and `<name>.run.json` beside its files
+names its `repo`, `issue`, `title` (listed as `issue_title`), `model`, `started_at` and `unit`. Such a run is alive
+while the unit its run.json names is active and is exactly `dispatch-<name>.service` or `caduceus-<name>.service`
+(any other value is ignored), and Stop is `systemctl --user stop` on that unit, never another. Both engines use the
+same run names (`<repo>-issue-<N>`): a name in several runs directories is listed once, with all its files read from
+the directory whose run.json has the later `started_at` (when either has none, the one whose run files were written
+last). An earlier attempt (`<name>-attemptK.*`) is a finished run with its own id.
 Finished runs are listed for 7 days (dispatch keeps their files 30 days). A missing or malformed `run.json` only
 means the run has no `repo`/`issue`.
 
@@ -41,9 +46,9 @@ so the relay container's user can connect):
   for rewinds. The query and snippets are never logged.
 
 Flags: `-socket`, `-processes` (default `~/.hermes/processes.json`), `-runs` (comma-separated, default
-`~/.local/state/hermes-runs,~/.hermes/cache/scratch/tmac/wt`: the old scratch folder is read as a second directory
-until it is empty; a run's file comes from the first directory that has it), `-hermes` (default
-`~/.local/bin/hermes`), `-hermes-home` (default `~/.hermes`), `-hermes-agent` (default `~/.hermes/hermes-agent`).
+`~/.local/state/hermes-runs,~/.local/state/caduceus/runs,~/.hermes/cache/scratch/tmac/wt`: hermes-dispatch's,
+Caduceus', and the old scratch folder until it is empty; a run name found in several is read from one, as above),
+`-hermes` (default `~/.local/bin/hermes`), `-hermes-home` (default `~/.hermes`), `-hermes-agent` (default `~/.hermes/hermes-agent`).
 
 ## Install (optiplex, as your user)
 

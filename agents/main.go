@@ -31,8 +31,9 @@ func main() {
 		"Unix socket to serve on (its directory is made 0755, the socket 0666)")
 	procs := flag.String("processes", filepath.Join(home, ".hermes", "processes.json"), "Hermes' process list")
 	runs := flag.String("runs", filepath.Join(home, ".local", "state", "hermes-runs")+","+
-		filepath.Join(home, ".hermes", "cache", "scratch", "tmac", "wt"),
-		"comma-separated directories of Claude Code delegate runs (the first wins; the second is the old scratch folder)")
+		filepath.Join(home, ".local", "state", "caduceus", "runs")+","+filepath.Join(home, ".hermes", "cache", "scratch", "tmac", "wt"),
+		"comma-separated directories of Claude Code delegate runs (hermes-dispatch's, Caduceus', the old scratch folder); "+
+			"a run name in several is read from the one with the newer run")
 	hermes := flag.String("hermes", filepath.Join(home, ".local", "bin", "hermes"), "the hermes command (asked for its Python by rewinds)")
 	hermesHome := flag.String("hermes-home", filepath.Join(home, ".hermes"), "HERMES_HOME for rewinds")
 	hermesAgent := flag.String("hermes-agent", filepath.Join(home, ".hermes", "hermes-agent"), "Hermes' code, imported by rewinds")
@@ -89,12 +90,12 @@ func listen(path string) (net.Listener, error) {
 	return ln, nil
 }
 
-// activeUnits lists the active dispatch-*.service user units; none when systemctl fails.
+// activeUnits lists the active dispatch-*.service and caduceus-*.service user units; none when systemctl fails.
 func activeUnits() map[string]bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, _ := exec.CommandContext(ctx, "systemctl", "--user", "list-units", "--plain", "--no-legend", "--no-pager", "--full",
-		"dispatch-*.service").Output()
+		"dispatch-*.service", "caduceus-*.service").Output()
 	return parseActiveUnits(string(out))
 }
 
