@@ -1,0 +1,69 @@
+# Caduceus settings (caduceus SPEC section 6), from the hermes-dispatch profile with gates split by meaning by Hermes.
+kind = "service"
+language = "go"
+hosts = ["optiplex"]
+model = "opus"
+rules = [
+  "Build and test only with `go -C relay test|vet|build ...`, `go -C agents test|vet|build ...`, `go -C term test|vet|build ...` and `gofmt`.",
+  "Tests never touch the real relay, Hermes, the helper's real socket, a real database file outside the test's temp dir, or files outside temp dirs.",
+  "Never log tokens, pairing codes, image bytes, data URLs or message text.",
+]
+network = "No network: no WebFetch, WebSearch, curl, wget, `go get` or new modules (GOPROXY is off). Standard library only unless the issue says otherwise (term/ may use github.com/creack/pty, already in its go.mod and the module cache)."
+
+[env]
+GOFLAGS = "-mod=readonly"
+GOPROXY = "off"
+
+[gates]
+test = [
+  "go -C relay test ./...",
+  "go -C agents test ./...",
+  "go -C term test ./...",
+]
+build = [
+  "go -C relay build ./...",
+  "go -C agents build ./...",
+  "go -C term build ./...",
+]
+lint = [
+  "go -C relay vet ./...",
+  "go -C agents vet ./...",
+  "go -C term vet ./...",
+]
+format = [
+  "gofmt -l relay agents term",
+]
+
+[review]
+# -race needs cgo, which optiplex lacks: the pinned golang container, offline. term's TestEchoAndEnvironment is skipped there (Debian's /etc/profile resets PATH).
+gates = [
+  "docker run --rm --user \"$(id -u):$(id -g)\" -v \"$PWD\":/src -w /src/relay -v \"$(go env GOMODCACHE)\":/go/pkg/mod:ro -e GOPROXY=off -e GOFLAGS=-mod=readonly -e GOCACHE=/tmp/gocache -e HOME=/tmp golang:1.27.3-bookworm go test -race ./...",
+  "docker run --rm --user \"$(id -u):$(id -g)\" -v \"$PWD\":/src -w /src/agents -v \"$(go env GOMODCACHE)\":/go/pkg/mod:ro -e GOPROXY=off -e GOFLAGS=-mod=readonly -e GOCACHE=/tmp/gocache -e HOME=/tmp golang:1.27.3-bookworm go test -race ./...",
+  "docker run --rm --user \"$(id -u):$(id -g)\" -v \"$PWD\":/src -w /src/term -v \"$(go env GOMODCACHE)\":/go/pkg/mod:ro -e GOPROXY=off -e GOFLAGS=-mod=readonly -e GOCACHE=/tmp/gocache -e HOME=/tmp golang:1.27.3-bookworm go test -race -skip TestEchoAndEnvironment ./...",
+]
+
+[access]
+allow = [
+  "Bash(python3*)",
+  "Bash(go -C relay test*)",
+  "Bash(go -C relay vet*)",
+  "Bash(go -C relay build*)",
+  "Bash(go -C agents test*)",
+  "Bash(go -C agents vet*)",
+  "Bash(go -C agents build*)",
+  "Bash(go -C term test*)",
+  "Bash(go -C term vet*)",
+  "Bash(go -C term build*)",
+  "Bash(gofmt*)",
+]
+deny = [
+  "Bash(go get*)",
+  "Bash(go mod*)",
+  "Bash(go install*)",
+]
+protected = [
+  "apps/**",
+  "probe/**",
+  "compose*.yml",
+  "Dockerfile*",
+]
