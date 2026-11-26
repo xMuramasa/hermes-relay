@@ -1,18 +1,49 @@
 # hermes-relay
 
-The relay server and WebSocket protocol behind the Trismegistus companion apps for
-[Hermes Agent](https://hermes-agent.nousresearch.com) running on a home server: the native macOS app
-([trismegistus-mac](https://github.com/xMuramasa/trismegistus-mac)) and the native Android app
-([trismegistus-android](https://github.com/xMuramasa/trismegistus-android)). This repo was `xMuramasa/trismegistus`
-until 2026-11-11; GitHub redirects the old links. See [SPEC.md](SPEC.md).
+[![CI](https://github.com/xMuramasa/hermes-relay/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/xMuramasa/hermes-relay/actions/workflows/ci.yml)
+![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-```
-apps (macOS, Android) --WebSocket--> relay (Go) --HTTP/SSE--> Hermes API server (localhost only)
+The relay server and WebSocket protocol behind **Trismegistus**, native companion apps for
+[Hermes Agent](https://hermes-agent.nousresearch.com) running on a home server: the macOS app
+([trismegistus-mac](https://github.com/xMuramasa/trismegistus-mac), SwiftUI) and the Android app
+([trismegistus-android](https://github.com/xMuramasa/trismegistus-android), Jetpack Compose). The apps talk only to
+the relay. The relay holds the Hermes API key, keeps runs alive across flaky mobile connections, and gives every
+device the same live view. This repo was `xMuramasa/trismegistus` until 2026-11-11; GitHub redirects the old links.
+
+```mermaid
+flowchart LR
+  mac["macOS app (SwiftUI)"] -- "WebSocket + REST" --> relay
+  phone["Android app (Jetpack Compose)"] -- "WebSocket + REST" --> relay
+  relay["hermes-relay (Go, SQLite)"] -- "HTTP + SSE" --> hermes["Hermes API server (localhost only)"]
+  relay -- "Unix socket" --> term["term helper: shells"]
+  relay -- "Unix socket" --> agents["agents helper: background runs"]
 ```
 
-Status: phase 0 done (`probe/FINDINGS.md`); phase 1 (protocol + relay) built, tested and deployed, since extended
-for the Mac app. The Expo Android app (`apps/mobile`, phase 2a) was removed on 2026-11-02 for a native build; its
-code is at the tag `expo-archive`.
+## What it does
+
+- **Runs survive dropped connections.** One prompt is one Hermes run. The relay numbers and stores every event of
+  the run; a device that comes back sends the last number it saw and gets the rest, so a locked phone or a lost
+  signal never loses an answer.
+- **One protocol, three codebases.** The WebSocket protocol is a JSON Schema ([`protocol/schema.json`](protocol))
+  with valid and invalid example messages. The relay and both apps test against the same examples, and each app
+  carries a copy with a staleness test.
+- **Pairing and per-device access.** A QR code with a single-use code pairs a device; each device gets its own
+  token. Revoking a device, or turning off one of its grants (the terminal is off by default), closes its live
+  sockets within about 2 seconds.
+- **Approvals from anywhere.** Commands that Hermes' reviewer escalates show up on every device as Once, This
+  session or Deny.
+- **More than chat.** REST endpoints for sessions, cron jobs, GitHub issues and the project board, background agent
+  runs, message search and image attachments, plus a terminal drawer for the Mac app.
+- **Safe to run.** The API key never leaves the server; logs never hold message text, tokens, pairing codes or
+  approval commands (a test fails the suite if one does); every socket has size, rate and backlog limits.
+- **Tested without a real Hermes.** `internal/fakehermes` replays recorded Hermes event streams with controllable
+  timing: held streams, cut streams, silent streams and relay restarts.
+
+Status: deployed on a homelab and used daily by both apps. The first Android client, an Expo app, was replaced by the
+native app on 2026-11-02; its code is at the tag `expo-archive`. The design and its decisions are in
+[SPEC.md](SPEC.md).
 
 ## Layout
 
@@ -92,6 +123,8 @@ live in the homelab repo.
 | `TRUSTED_PROXIES` | `127.0.0.1/32,172.16.0.0/12` | peers whose `X-Forwarded-For` is honored (rate limits) |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `TERM_SOCKET` | (none) | the host helper `trismegistus-term`'s socket, an absolute path; empty and `/api/terminal` answers `not_configured` |
+| `AGENTS_SOCKET` | (none) | the host helper `trismegistus-agents`' socket, for `/api/agents` (see `agents/README.md`) |
+| `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_PROJECT` | (none) | for the `/api/github` endpoints: a token, the owner and the project board's node id (`PVT_...`); never logged |
 
 ### Commands
 

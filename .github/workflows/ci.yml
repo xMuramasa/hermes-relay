@@ -1,0 +1,41 @@
+name: CI
+
+# The [gates] of .caduceus/project.toml, plus the race detector from its [review] gates.
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: |
+            relay/go.sum
+            agents/go.sum
+            term/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l relay agents term)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+
+      - name: vet
+        run: for m in relay agents term; do go -C $m vet ./...; done
+
+      - name: build
+        run: for m in relay agents term; do go -C $m build ./...; done
+
+      - name: test
+        run: for m in relay agents term; do go -C $m test -count=1 ./...; done
+
+      - name: test with the race detector
+        run: for m in relay agents term; do go -C $m test -race -count=1 ./...; done

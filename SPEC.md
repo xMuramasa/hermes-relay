@@ -33,8 +33,8 @@ connections and keeps Hermes' API key off the devices.
 - Approvals stay in Hermes' smart mode: only commands the AI reviewer escalates reach the phone. The modal offers
   Once / This session / Deny; Hermes' `always` choice is hidden on purpose.
 - Logs: the relay's stdout shows in Dozzle; Hermes' own logs are already there (`homelab/hermes-logs`).
-- Private repo `xMuramasa/hermes-relay` (`~/Projects/hermes-relay` on optiplex), direct
-  commits to `main`.
+- Repo `xMuramasa/hermes-relay` (`~/Projects/hermes-relay` on optiplex), public since 2026-11-26 under the MIT
+  license. Work lands on `develop` through pull requests; `main` moves only with a release.
 
 ## Flow
 
